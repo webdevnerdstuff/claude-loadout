@@ -11,6 +11,7 @@ import type {
 	SkillScan,
 	SkillSource,
 	SkillUsage,
+	PluginUpdates,
 } from '../types';
 import {
 	bodyOf,
@@ -942,6 +943,15 @@ const say = async ($: EngineInterface, text: string): Promise<void> => {
 	});
 };
 
+// Newer versions of installed plugins, from the last daily check.
+const updates = atom(
+	{ plugin: 'loadout', key: 'updates' } as const,
+	{},
+	{
+		shape: 'updates-1',
+	},
+);
+
 // skillOverrides entries Loadout just set to "off" that Claude Code's loaded
 // settings may not have yet.
 const turnedOff = atom({ plugin: 'loadout', key: 'turnedOff' } as const, [], {
@@ -1638,6 +1648,218 @@ const openAccountSkills = async ($: EngineInterface): Promise<void> => {
 	if (code !== 0) void say($, 'Could not open your skills in the Claude app');
 };
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+const UPDATES_KEY = 'updateCheck';
+
+const partsOf = (version: string): number[] | undefined => {
+	const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
+
+	return match === null ? undefined : match.slice(1).map(Number);
+};
+
+// Plain x.y.z only; anything else is never called newer, so a bad file or a
+// commit-id version cannot nag.
+const isNewer = (latest: string, current: string): boolean => {
+	const a = partsOf(latest);
+	const b = partsOf(current);
+	if (a === undefined || b === undefined) return false;
+	const at = a.findIndex((part, index) => part !== b[index]);
+
+	return at !== -1 && (a[at] ?? 0) > (b[at] ?? 0);
+};
+
+const RAW = 'https://raw.githubusercontent.com';
+
+const githubRepoOf = (url: string): string | undefined =>
+	/^https:\/\/github\.com\/([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(url)?.[1];
+
+const fetchText = async (
+	$: EngineInterface,
+	url: string,
+): Promise<string | undefined> => {
+	const response = await $.http.fetch(url).catch(() => undefined);
+
+	return response?.ok ? response.text : undefined;
+};
+
+const versionIn = (text: string | undefined): string | undefined => {
+	if (text === undefined) return undefined;
+	try {
+		const version = (JSON.parse(text) as { version?: unknown }).version;
+		return typeof version === 'string' ? version : undefined;
+	} catch {
+		return undefined;
+	}
+};
+
+type MarketplaceEntry = { name?: unknown; version?: unknown; source?: unknown };
+
+// The newest version a marketplace offers for one plugin, the way Claude Code
+// resolves it: the marketplace's current list on GitHub, then the plugin.json
+// its entry points to (a folder of the marketplace repo, a repo of its own, or
+// a pinned commit).
+const latestVersionOf = async (
+	$: EngineInterface,
+	marketplaceRepo: string,
+	list: MarketplaceEntry[],
+	name: string,
+): Promise<string | undefined> => {
+	const entry = list.find((one) => one.name === name);
+	if (!entry) return undefined;
+	if (typeof entry.version === 'string') return entry.version;
+	const source = entry.source;
+	if (typeof source === 'string') {
+		const path = source.replace(/^\.\//, '').replace(/\/$/, '');
+		return versionIn(
+			await fetchText(
+				$,
+				`${RAW}/${marketplaceRepo}/HEAD/${path ? `${path}/` : ''}.claude-plugin/plugin.json`,
+			),
+		);
+	}
+	if (!source || typeof source !== 'object') return undefined;
+	const spec = source as {
+		source?: unknown;
+		repo?: unknown;
+		url?: unknown;
+		sha?: unknown;
+		ref?: unknown;
+		path?: unknown;
+	};
+	const repo =
+		spec.source === 'github' && typeof spec.repo === 'string'
+			? spec.repo
+			: typeof spec.url === 'string'
+				? githubRepoOf(spec.url)
+				: undefined;
+	if (!repo) return undefined;
+	const ref =
+		typeof spec.sha === 'string'
+			? spec.sha
+			: typeof spec.ref === 'string'
+				? spec.ref
+				: 'HEAD';
+	const sub =
+		typeof spec.path === 'string'
+			? `${spec.path.replace(/^\.?\//, '').replace(/\/$/, '')}/`
+			: '';
+
+	return versionIn(
+		await fetchText(
+			$,
+			`${RAW}/${repo}/${ref}/${sub}.claude-plugin/plugin.json`,
+		),
+	);
+};
+
+// Once a day: every marketplace-installed plugin's newest version against the
+// one installed. Stamped before fetching, so an offline Mac is not asked again
+// every session. Read-only: nothing is installed or changed here.
+const checkForUpdates = async (
+	$: EngineInterface,
+	isForced = false,
+): Promise<void> => {
+	const now = Date.now();
+	const last = (await $.store.get(UPDATES_KEY)) as
+		| { at?: unknown }
+		| undefined;
+	if (!isForced && typeof last?.at === 'number' && now - last.at < DAY_MS)
+		return;
+	await $.store.set(UPDATES_KEY, { at: now });
+
+	const home = (await $.env.get('HOME')) ?? '';
+	const readJson = async (file: string): Promise<unknown> =>
+		JSON.parse(String(await $.fs.read(file).catch(() => '{}')));
+	const installed =
+		(
+			(await readJson(
+				`${home}/.claude/plugins/installed_plugins.json`,
+			)) as {
+				plugins?: Record<string, Array<{ version?: unknown }>>;
+			}
+		).plugins ?? {};
+	const known = (await readJson(
+		`${home}/.claude/plugins/known_marketplaces.json`,
+	)) as Record<string, { source?: { source?: unknown; repo?: unknown } }>;
+
+	const found: PluginUpdates = {};
+	const lists = new Map<string, MarketplaceEntry[]>();
+	for (const [key, installs] of Object.entries(installed)) {
+		const [name, marketplace] = key.split('@');
+		const current = installs[0]?.version;
+		const repo = marketplace ? known[marketplace]?.source?.repo : undefined;
+		if (
+			!name ||
+			!marketplace ||
+			typeof current !== 'string' ||
+			typeof repo !== 'string'
+		)
+			continue;
+		if (known[marketplace]?.source?.source !== 'github') continue;
+		if (!lists.has(marketplace)) {
+			const text = await fetchText(
+				$,
+				`${RAW}/${repo}/HEAD/.claude-plugin/marketplace.json`,
+			);
+			let list: MarketplaceEntry[] = [];
+			try {
+				list = text
+					? ((JSON.parse(text) as { plugins?: MarketplaceEntry[] })
+							.plugins ?? [])
+					: [];
+			} catch {
+				list = [];
+			}
+			lists.set(marketplace, list);
+		}
+		const latest = await latestVersionOf(
+			$,
+			repo,
+			lists.get(marketplace) ?? [],
+			name,
+		);
+		if (latest && isNewer(latest, current))
+			found[key] = { current, latest };
+	}
+
+	await update($, updates, () => found);
+	const count = Object.keys(found).length;
+	if (count > 0) {
+		$.ui.toast(
+			`${count === 1 ? '1 plugin update is' : `${count} plugin updates are`} available: open /loadout`,
+			{ timeoutMs: 12_000 },
+		);
+	}
+};
+
+// Updates one plugin through Claude Code itself: its marketplace's list, then
+// the plugin. A restart applies it.
+const updatePlugin = async (
+	$: EngineInterface,
+	key: string,
+	surface: CopySurface,
+): Promise<void> => {
+	const marketplace = key.split('@')[1] ?? '';
+	await runClaude(
+		$,
+		['plugin', 'marketplace', 'update', marketplace],
+		surface,
+	);
+	const isUpdated = await runClaude($, ['plugin', 'update', key], surface);
+	if (isUpdated) {
+		await update($, updates, (all) =>
+			Object.fromEntries(
+				Object.entries(all).filter(([one]) => one !== key),
+			),
+		);
+		void say(
+			$,
+			`Updated ${key.split('@')[0]}. Restart Claude to use the new version`,
+		);
+	}
+	await rescan($);
+};
+
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
 
 const countOff = (skills: SkillEntry[]): number =>
@@ -1665,6 +1887,7 @@ export const register: Register = (on) => {
 		});
 		void loadUsage($);
 		void rescan($);
+		void checkForUpdates($).catch(() => undefined);
 
 		return next(e);
 	});
@@ -1691,6 +1914,7 @@ export const register: Register = (on) => {
 		const used = await read($, usage);
 		const waiting = await read($, confirm);
 		const shownNotice = await read($, notice);
+		const available = await read($, updates);
 
 		if (!data) {
 			return (
@@ -2177,6 +2401,7 @@ export const register: Register = (on) => {
 			isForced: boolean,
 			tags?: string,
 			tally?: string,
+			badge?: string,
 		) => {
 			const isOpen = isForced || expanded.includes(id);
 			const issues = skills.filter(
@@ -2202,6 +2427,11 @@ export const register: Register = (on) => {
 						)}
 						{isForced && (
 							<Text>{`▾ ${label} (${tally ?? skills.length})`}</Text>
+						)}
+						{badge && (
+							<Text color="warning" size="caption">
+								{badge}
+							</Text>
 						)}
 						{!isOpen && issues > 0 && (
 							<Text color="warning" size="caption">
@@ -2366,7 +2596,12 @@ export const register: Register = (on) => {
 						<Button
 							label="Refresh"
 							dimColor
-							onPress={() => void rescan($)}
+							onPress={() => {
+								void rescan($);
+								void checkForUpdates($, true).catch(
+									() => undefined,
+								);
+							}}
 						/>
 					</Box>
 				</Box>
@@ -2379,6 +2614,30 @@ export const register: Register = (on) => {
 						>
 							{`${shownNotice.isError ? '⚠' : '✓'} ${shownNotice.text}`}
 						</Text>
+					</Box>
+				)}
+
+				{Object.keys(available).length > 0 && (
+					<Box flexDirection="column" marginTop="xs">
+						{Object.entries(available).map(([key, version]) => (
+							<Box
+								key={`update-row:${key}`}
+								flexDirection="row"
+								alignItems="center"
+								gap={1}
+							>
+								<Text color="warning" size="footnote">
+									{`⬆ ${key.split('@')[0]} ${version.latest} is out (you have ${version.current})`}
+								</Text>
+								<Button
+									key={`update:${key}`}
+									label="Update"
+									onPress={(press) =>
+										void updatePlugin($, key, press.surface)
+									}
+								/>
+							</Box>
+						))}
 					</Box>
 				)}
 
@@ -2453,6 +2712,10 @@ export const register: Register = (on) => {
 							.filter(Boolean)
 							.join(' · ');
 
+						const newer = plugin.marketplace
+							? available[`${plugin.name}@${plugin.marketplace}`]
+							: undefined;
+
 						return fold(
 							`group:${plugin.name}`,
 							plugin.name,
@@ -2460,6 +2723,7 @@ export const register: Register = (on) => {
 							isAcross,
 							pluginTags(plugin),
 							tally,
+							newer ? `⬆ ${newer.latest} available` : undefined,
 						);
 					})}
 

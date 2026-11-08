@@ -177,6 +177,9 @@ const childrenOf = (files: Record<string, Node>, path: string) =>
 			isLink: Boolean(node.linkTo),
 		}));
 
+// What GitHub answers in a test: raw file text by URL; anything else is a 404.
+let WEB: Record<string, string> = {};
+
 type Engine = {
 	draft: string;
 	fills: string[];
@@ -259,6 +262,18 @@ function engine(
 		};
 	});
 	on('fs.exists', (_, e) => ({ value: Boolean(files[e.path]) }));
+	on('http.fetch', (_, e) => {
+		const text = WEB[e.url];
+
+		return {
+			value: {
+				ok: text !== undefined,
+				status: text !== undefined ? 200 : 404,
+				headers: {},
+				text: text ?? '',
+			},
+		};
+	});
 	on('fs.write', (_, e) => {
 		state.writes[e.path] = e.text;
 
@@ -1313,5 +1328,79 @@ test('a project skill with a problem gets no fixes that write, and Turn on leave
 		(await ui.find({ type: 'Text', text: /doesn't change repo files/ }))
 			?.text,
 	).toMatch(/bare is turned off in this project's \.claude\/settings\.json/);
+	await ui.unmount();
+});
+
+test('a newer plugin version shows with an Update button that updates it through Claude Code', async ($, on) => {
+	const RAW = 'https://raw.githubusercontent.com';
+	WEB = {
+		[`${RAW}/owner/market/HEAD/.claude-plugin/marketplace.json`]:
+			JSON.stringify({
+				plugins: [
+					{
+						name: 'tools',
+						source: { source: 'github', repo: 'owner/tools' },
+					},
+				],
+			}),
+		[`${RAW}/owner/tools/HEAD/.claude-plugin/plugin.json`]:
+			'{"name":"tools","version":"1.3.0"}',
+	};
+	const state = engine(on, {
+		...FILES,
+		[`${HOME}/.claude/plugins/known_marketplaces.json`]: {
+			kind: 'file',
+			text: JSON.stringify({
+				market: { source: { source: 'github', repo: 'owner/market' } },
+			}),
+		},
+	});
+	const ui = await mount($);
+
+	expect((await ui.find({ type: 'Text', text: /is out/ }))?.text).toBe(
+		'⬆ tools 1.3.0 is out (you have 1.2.0)',
+	);
+	expect((await ui.find({ type: 'Text', text: /available$/ }))?.text).toBe(
+		'⬆ 1.3.0 available',
+	);
+	await ui.press({ key: 'update:tools@market' });
+	expect(state.runs).toContainEqual([
+		'claude',
+		'plugin',
+		'marketplace',
+		'update',
+		'market',
+	]);
+	expect(state.runs).toContainEqual([
+		'claude',
+		'plugin',
+		'update',
+		'tools@market',
+	]);
+	expect(await ui.find({ type: 'Text', text: /is out/ })).toBeUndefined();
+	WEB = {};
+	await ui.unmount();
+});
+
+test('an older or non-numbered remote version is never shown as an update', async ($, on) => {
+	const RAW = 'https://raw.githubusercontent.com';
+	WEB = {
+		[`${RAW}/owner/market/HEAD/.claude-plugin/marketplace.json`]:
+			JSON.stringify({
+				plugins: [{ name: 'tools', version: 'abc123' }],
+			}),
+	};
+	engine(on, {
+		...FILES,
+		[`${HOME}/.claude/plugins/known_marketplaces.json`]: {
+			kind: 'file',
+			text: JSON.stringify({
+				market: { source: { source: 'github', repo: 'owner/market' } },
+			}),
+		},
+	});
+	const ui = await mount($);
+	expect(await ui.find({ type: 'Text', text: /is out/ })).toBeUndefined();
+	WEB = {};
 	await ui.unmount();
 });

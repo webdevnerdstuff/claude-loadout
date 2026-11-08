@@ -55,6 +55,7 @@ The desktop app's **Customize → Skills** page only lists your claude.ai accoun
 - **If Claude Code can't be run** for Uninstall plugin, the command is copied for you to paste into a terminal instead.
 - **VS Code ↗** (Local and Project skills): opens the skill's `SKILL.md` in VS Code, or in your default text editor when VS Code isn't installed
 - **Finder ↗** (Local and Project skills): shows the skill's folder in Finder
+- **Plugin updates**: once a day (and on **Refresh**) Loadout checks each installed plugin's marketplace on GitHub for a newer version. An update shows at the top of the pane ("⬆ skins 0.5.16 is out (you have 0.5.12)") and on the plugin, with an **Update** button that runs Claude Code's own `claude plugin marketplace update` and `claude plugin update`; restart Claude to use it. Only plain `x.y.z` versions count.
 - **Usage counts**: how often each skill ran and when it last did, kept across sessions
 
 ## Requirements

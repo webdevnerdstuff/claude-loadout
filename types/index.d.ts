@@ -27,6 +27,9 @@ export type OffPlugin = {
 	isLastFromMarketplace: boolean;
 };
 
+/** Newer versions found for installed plugins, by `name@marketplace`. */
+export type PluginUpdates = Record<string, { current: string; latest: string }>;
+
 /** The line at the top of the pane that says what an action just did. */
 export type PaneNotice = { text: string; isError: boolean; at: number };
 
@@ -114,6 +117,7 @@ declare module 'claude-code' {
 			cleared: Shaped<string[]>;
 			turnedOff: Shaped<string[]>;
 			notice: Shaped<PaneNotice | null>;
+			updates: Shaped<PluginUpdates>;
 		};
 	}
 }
