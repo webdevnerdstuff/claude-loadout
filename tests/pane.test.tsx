@@ -186,6 +186,9 @@ type Engine = {
 	stored: Record<string, unknown>;
 	runs: string[][];
 	writes: Record<string, string>;
+	opens: Record<string, unknown>[];
+	// What ui.open answers: placed, unless a test says why not.
+	notPlaced?: string;
 };
 
 // Every hook here stands for the engine beneath the plugin: the file system,
@@ -201,9 +204,18 @@ function engine(
 		stored: {},
 		runs: [],
 		writes: {},
+		opens: [],
 	};
 	on('command.register', () => ({ value: { command: 'loadout' } }));
-	on('ui.open', () => ({ value: { isPlaced: true } }));
+	on('ui.open', (_, e) => {
+		state.opens.push({ ...e });
+
+		return {
+			value: state.notPlaced
+				? { isPlaced: false, reason: state.notPlaced }
+				: { isPlaced: true },
+		};
+	});
 	on('ui.toast', () => ({ value: undefined }));
 	on('session.start', (_, e) => ({ cwd: e.cwd }));
 	on('session.root', () => ({ value: '/project' }));
@@ -1403,4 +1415,32 @@ test('an older or non-numbered remote version is never shown as an update', asyn
 	expect(await ui.find({ type: 'Text', text: /is out/ })).toBeUndefined();
 	WEB = {};
 	await ui.unmount();
+});
+
+test('/loadout opens the pane with the keyboard, so it can be used at once', async ($, on) => {
+	const state = engine(on);
+	await $.session.start({
+		cwd: '/project',
+		surface: 'terminal',
+		isInteractive: true,
+	});
+	const { text } = await $.command.run({ command: 'loadout' });
+
+	expect(state.opens).toEqual([
+		expect.objectContaining({ id: 'loadout', focus: true }),
+	]);
+	expect(text).toBe('Loadout opened.');
+});
+
+test('/loadout says why when the pane could not be placed', async ($, on) => {
+	const state = engine(on);
+	state.notPlaced = 'no-surface';
+	await $.session.start({
+		cwd: '/project',
+		surface: 'terminal',
+		isInteractive: true,
+	});
+	const { text } = await $.command.run({ command: 'loadout' });
+
+	expect(text).toMatch(/no-surface/);
 });
