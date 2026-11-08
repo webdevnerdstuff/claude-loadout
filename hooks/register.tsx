@@ -2747,42 +2747,32 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 			</Box>
 
 			<Box flexDirection="row" alignItems="center" gap={1} marginTop={1}>
-				{/* Before the box, so Down from it goes to the first match, and
-				    drawn even with nothing searched: the ring holds a place, not
-				    an element, so one that appears in front of the box as you
-				    type would take the focus from it. */}
-				<Button
-					key="search-clear"
-					// Enter empties the box the way the prompt empties on send,
-					// so the search it applied is named here.
-					label={isSearching ? `✕ ${searched.trim()}` : 'Clear'}
-					dimColor={!isSearching}
-					onPress={() => void update($, query, () => '')}
-				/>
+				{/* It only narrows the list. Enter empties the box the way the
+				    prompt empties on send, so it clears the search to match. */}
 				<Input
 					key="search"
 					placeholder="Search skills and plugins"
 					value={searched}
-					submitLabel="first match"
+					submitLabel=""
 					onInput={(value) => void update($, query, () => value)}
-					onSubmit={(value) => {
-						void update($, query, () => value);
-						// Enter leaves the box for the first match.
-						const first = paneRing
-							.slice(paneRing.indexOf('search') + 1)
-							.find(
-								(key) =>
-									key.startsWith('row:') ||
-									key.startsWith('fold:'),
-							);
-						if (first) {
-							ringAt = first;
-							void $.ui
-								.focus({ requestId: PANE, key: first })
-								.catch(() => undefined);
-						}
-					}}
+					onSubmit={() => void update($, query, () => '')}
 				/>
+				{isSearching && (
+					<Button
+						key="search-clear"
+						label="Clear"
+						dimColor
+						onPress={() => {
+							void update($, query, () => '');
+							// Back to the box: letters typed while a button holds
+							// the focus go to the prompt, not the pane.
+							ringAt = 'search';
+							void $.ui
+								.focus({ requestId: PANE, key: 'search' })
+								.catch(() => undefined);
+						}}
+					/>
+				)}
 			</Box>
 
 			{isSearching &&

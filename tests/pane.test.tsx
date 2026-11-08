@@ -1462,7 +1462,7 @@ test('the focused pane starts its ring on the search box, so typing searches at 
 test('typing in the search box narrows every section to the matches', async ($, on) => {
 	engine(on);
 	const ui = await mount($, 'terminal');
-	await ui.input({ key: 'search', text: 'commit' });
+	await ui.input({ key: 'search', text: 'commit', kind: 'change' });
 
 	// gac matches by its description; cr does not.
 	expect(
@@ -1478,7 +1478,7 @@ test('typing in the search box narrows every section to the matches', async ($, 
 test('a match inside a folded plugin shows without opening the fold', async ($, on) => {
 	engine(on);
 	const ui = await mount($, 'terminal');
-	await ui.input({ key: 'search', text: 'PLAN' });
+	await ui.input({ key: 'search', text: 'PLAN', kind: 'change' });
 
 	expect((await ui.find({ type: 'Button', text: /plan/ }))?.text).toMatch(
 		/plan/,
@@ -1489,18 +1489,52 @@ test('a match inside a folded plugin shows without opening the fold', async ($, 
 	await ui.unmount();
 });
 
-test('a search with no match says so, and Clear brings everything back', async ($, on) => {
+test('a search with no match says so', async ($, on) => {
 	engine(on);
 	const ui = await mount($, 'terminal');
-	await ui.input({ key: 'search', text: 'zzz-nothing' });
+	await ui.input({ key: 'search', text: 'zzz-nothing', kind: 'change' });
 	expect(
 		(await ui.find({ type: 'Text', text: /Nothing matches/ }))?.text,
 	).toMatch(/zzz-nothing/);
+	await ui.unmount();
+});
 
-	expect((await ui.find({ type: 'Button', key: 'search-clear' }))?.text).toBe(
-		'✕ zzz-nothing',
-	);
+test('Clear follows the search box while there is a search, and empties it', async ($, on) => {
+	engine(on);
+	const ui = await mount($, 'terminal');
+	expect(
+		await ui.find({ type: 'Button', key: 'search-clear' }),
+	).toBeUndefined();
+
+	await ui.input({ key: 'search', text: 'commit', kind: 'change' });
+	const clear = await ui.find({ type: 'Button', key: 'search-clear' });
+	expect(clear?.text).toBe('Clear');
+	const keys = [
+		...(await ui.findAll({ type: 'Input' })),
+		...(await ui.findAll({ type: 'Button' })),
+	].map((element) => element.key);
+	expect(keys).toContain('search');
+
 	await ui.press({ key: 'search-clear' });
+	expect(
+		await ui.find({ type: 'Button', key: 'row:user:user:cr' }),
+	).toBeDefined();
+	expect(
+		await ui.find({ type: 'Button', key: 'search-clear' }),
+	).toBeUndefined();
+	expect(
+		(await ui.find({ type: 'Input', key: 'search' }))?.props.submitLabel,
+	).toBe('');
+	await ui.unmount();
+});
+
+test('Enter, which empties the box, clears the search with it', async ($, on) => {
+	engine(on);
+	const ui = await mount($, 'terminal');
+	await ui.input({ key: 'search', text: 'commit', kind: 'change' });
+	await ui.input({ key: 'search', text: 'commit', kind: 'submit' });
+
+	// cr does not match `commit`; with the search cleared it shows again.
 	expect(
 		await ui.find({ type: 'Button', key: 'row:user:user:cr' }),
 	).toBeDefined();
@@ -1510,7 +1544,7 @@ test('a search with no match says so, and Clear brings everything back', async (
 test('/loadout starts with an empty search', async ($, on) => {
 	engine(on);
 	const ui = await mount($, 'terminal');
-	await ui.input({ key: 'search', text: 'commit' });
+	await ui.input({ key: 'search', text: 'commit', kind: 'change' });
 	await $.command.run({ command: 'loadout' });
 
 	expect(
