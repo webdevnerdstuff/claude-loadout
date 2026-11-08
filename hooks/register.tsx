@@ -11,6 +11,7 @@ import type {
 	SkillScan,
 	SkillSource,
 	SkillUsage,
+	PluginUpdates,
 } from '../types';
 import {
 	bodyOf,
@@ -399,13 +400,14 @@ const scanPlugins = async (
 		}
 		const from = one.marketplace
 			? `${plugin} plugin · ${one.marketplace} marketplace`
-			: `${plugin} plugin · dev folder`;
+			: `${plugin} plugin · local folder`;
 		skills.push(...found.map((skill) => ({ ...skill, origin: from })));
 		plugins.push({
 			name: plugin,
 			origin: one.origin,
 			marketplace: one.marketplace,
 			path: tilde(one.root, home),
+			root: one.root,
 			version:
 				typeof manifest.version === 'string'
 					? manifest.version
@@ -464,6 +466,8 @@ type SyncedManifest = {
 		name?: unknown;
 		description?: unknown;
 		enabled?: unknown;
+		creatorType?: unknown;
+		source?: unknown;
 	}>;
 };
 
@@ -534,6 +538,21 @@ const scanSynced = async (
 					tokens: description
 						? tokensOf(`${skill.name} ${description}`)
 						: undefined,
+					// Only skills the person made are on claude.ai's Yours list; the rest
+					// Anthropic gives every account.
+					isAccountOwn: skill.creatorType === 'user',
+					accountGroup:
+						skill.creatorType === 'user'
+							? 'yours'
+							: skill.source === 'anthropic-example'
+								? 'examples'
+								: skill.source === 'anthropic'
+									? 'documents'
+									: 'builtin',
+					origin:
+						skill.creatorType === 'user'
+							? 'Your claude.ai skill'
+							: 'From Anthropic, on every account',
 				});
 			}
 		}
@@ -634,6 +653,9 @@ const commandsOf = (
 			isOff: false,
 			problems: [],
 			kind: 'command' as const,
+			origin: plugin.marketplace
+				? `${plugin.name} plugin · ${plugin.marketplace} marketplace`
+				: `${plugin.name} plugin · local folder`,
 		}))
 		.sort((a, b) => a.name.localeCompare(b.name));
 };
@@ -679,6 +701,7 @@ const withOrigin = (
 	skill: SkillEntry,
 	lock: SkillLock,
 	home: string,
+	repoName: string,
 ): SkillEntry => {
 	const folderName = skill.folder?.slice(skill.folder.lastIndexOf('/') + 1);
 	const fromAgents = skill.linkTarget?.startsWith('~/.agents/skills/');
@@ -703,17 +726,45 @@ const withOrigin = (
 	}
 	if (skill.linkTarget)
 		return { ...skill, origin: 'A link to a folder elsewhere' };
-	if (skill.source === 'synced')
-		return { ...skill, origin: 'Your claude.ai account' };
 	if (skill.source === 'user')
 		return { ...skill, origin: 'Made in your skills folder' };
 
+	if (skill.source === 'project')
+		return {
+			...skill,
+			origin: `${repoName} repo · shared with everyone who clones it`,
+		};
+
 	return skill;
+};
+
+// The hooks module a plugin's hooks/hooks.json names (its first module),
+// absolute, when the file is there.
+const hooksModuleOf = async (
+	$: EngineInterface,
+	root: string,
+): Promise<string | undefined> => {
+	const raw = await $.fs
+		.read(`${root}/hooks/hooks.json`)
+		.catch(() => undefined);
+	if (typeof raw !== 'string') return undefined;
+	try {
+		const modules = (JSON.parse(raw) as { modules?: unknown }).modules;
+		const first = Array.isArray(modules) ? modules[0] : undefined;
+		if (typeof first !== 'string') return undefined;
+		const file = `${root}/hooks/${first.replace(/^\.\//, '')}`;
+
+		return (await $.fs.exists(file).catch(() => false)) ? file : undefined;
+	} catch {
+		return undefined;
+	}
 };
 
 const scanSkills = async ($: EngineInterface): Promise<SkillScan> => {
 	const home = (await $.env.get('HOME')) ?? '';
 	const projectDir = await $.session.root();
+	const repoName =
+		projectDir.slice(projectDir.lastIndexOf('/') + 1) || projectDir;
 	const loaded = ((await $.settings.read({ key: 'skillOverrides' })) ??
 		{}) as Overrides;
 	// Entries Loadout just removed from a settings file stay in Claude Code's
@@ -761,9 +812,46 @@ const scanSkills = async ($: EngineInterface): Promise<SkillScan> => {
 	const plugins = await scanPlugins($, home, projectDir, overrides);
 	const synced = await scanSynced($, home, overrides);
 	const listed = await $.command.list().catch(() => []);
-	const commands = plugins.plugins.flatMap((plugin) =>
-		commandsOf(listed, plugin, plugins.skills),
-	);
+	// A command a mod registers in code is not in Claude's context; one written
+	// as the plugin's commands/<name>.md is, by its description, like a skill.
+	const commands: SkillEntry[] = [];
+	for (const plugin of plugins.plugins) {
+		for (const command of commandsOf(listed, plugin, plugins.skills)) {
+			const short =
+				command.name.replace(/^\//, '').split(':').pop() ?? '';
+			const file = plugin.root
+				? `${plugin.root}/commands/${short}.md`
+				: '';
+			const text = file
+				? await $.fs.read(file).catch(() => undefined)
+				: undefined;
+			if (typeof text !== 'string') {
+				// Registered in code: its File is the module that registers it, the
+				// one the plugin's hooks/hooks.json names.
+				const module = plugin.root
+					? await hooksModuleOf($, plugin.root)
+					: undefined;
+				commands.push({
+					...command,
+					tokens: 0,
+					folder: plugin.root,
+					...(module
+						? { file: module, path: tilde(module, home) }
+						: {}),
+				});
+				continue;
+			}
+			const described =
+				parseFrontmatter(text).description || command.description;
+			commands.push({
+				...command,
+				folder: plugin.root,
+				file,
+				path: tilde(file, home),
+				tokens: tokensOf(`${command.name} ${described}`),
+			});
+		}
+	}
 	const builtins = new Set(
 		listed
 			.filter((command) => command.source === 'builtin')
@@ -778,7 +866,7 @@ const scanSkills = async ($: EngineInterface): Promise<SkillScan> => {
 		flagDuplicates(
 			[
 				...[...user, ...project, ...synced.skills].map((skill) =>
-					withOrigin(skill, lock, home),
+					withOrigin(skill, lock, home, repoName),
 				),
 				...plugins.skills,
 			],
@@ -813,7 +901,7 @@ const TITLE = 'Loadout';
 const USAGE_KEY = 'usage';
 
 const scan = atom({ plugin: 'loadout', key: 'scan' } as const, null, {
-	shape: 'scan-12',
+	shape: 'scan-16',
 });
 const filter = atom({ plugin: 'loadout', key: 'filter' } as const, 'local', {
 	shape: 'filter-1',
@@ -855,6 +943,15 @@ const say = async ($: EngineInterface, text: string): Promise<void> => {
 	});
 };
 
+// Newer versions of installed plugins, from the last daily check.
+const updates = atom(
+	{ plugin: 'loadout', key: 'updates' } as const,
+	{},
+	{
+		shape: 'updates-1',
+	},
+);
+
 // skillOverrides entries Loadout just set to "off" that Claude Code's loaded
 // settings may not have yet.
 const turnedOff = atom({ plugin: 'loadout', key: 'turnedOff' } as const, [], {
@@ -864,6 +961,16 @@ const turnedOff = atom({ plugin: 'loadout', key: 'turnedOff' } as const, [], {
 // The desktop draws some theme keys (merged, warning) and leaves others grey,
 // so the sources it would not color use fixed colors that read on light and
 // dark alike.
+// How claude.ai account skills are grouped, by who made them, as the app's
+// data says: your own, Anthropic's examples, its document skills, built-ins.
+const ACCOUNT_GROUPS: Array<[NonNullable<SkillEntry['accountGroup']>, string]> =
+	[
+		['yours', 'Yours'],
+		['examples', 'Anthropic examples'],
+		['documents', 'Anthropic document skills'],
+		['builtin', 'Built into Claude'],
+	];
+
 const SOURCE_COLOR: Record<SkillSource, string> = {
 	user: '#4c9aff',
 	project: '#3fb950',
@@ -1032,22 +1139,20 @@ const overrideKeysOf = (skill: SkillEntry): string[] => [
 	...new Set([skill.slash.slice(1), skill.name]),
 ];
 
-// Removes `keys` from `skillOverrides` in every settings file that has them:
-// the user's, the project's and the project's local one. Only those entries
-// change: the rest of the file, its key order and its indentation stay, and
-// what is written is read back and parsed before it counts. The file's text
-// never leaves this function: it is not logged, stored or shown.
+// Removes `keys` from `skillOverrides` in the user's own settings,
+// ~/.claude/settings.json. Loadout never writes inside a repo, so a project's
+// .claude/settings(.local).json is only read, to say an entry is there. Only
+// those entries change: the rest of the file, its key order and its
+// indentation stay, and what is written is read back and parsed before it
+// counts. The file's text never leaves this function: it is not logged,
+// stored or shown.
 const removeOverrides = async (
 	$: EngineInterface,
 	keys: string[],
 ): Promise<number> => {
 	const home = (await $.env.get('HOME')) ?? '';
 	const root = await $.session.root();
-	const files = [
-		`${home}/.claude/settings.json`,
-		`${root}/.claude/settings.json`,
-		`${root}/.claude/settings.local.json`,
-	];
+	const files = [`${home}/.claude/settings.json`];
 	let removed = 0;
 
 	for (const file of [...new Set(files)]) {
@@ -1141,27 +1246,59 @@ const turnSkillOff = async (
 };
 
 // Turns a skill back on by removing its "off" entry from skillOverrides.
+// Which of the project's own settings files still sets one of `keys`: those
+// are the repo's, so Loadout names them and leaves them alone.
+const repoOverrideFile = async (
+	$: EngineInterface,
+	keys: string[],
+): Promise<string | undefined> => {
+	const root = await $.session.root();
+	for (const name of ['settings.json', 'settings.local.json']) {
+		const raw = await $.fs
+			.read(`${root}/.claude/${name}`)
+			.catch(() => undefined);
+		if (typeof raw !== 'string') continue;
+		try {
+			const overrides = (
+				JSON.parse(raw) as { skillOverrides?: Record<string, unknown> }
+			).skillOverrides;
+			if (overrides && keys.some((key) => key in overrides))
+				return `.claude/${name}`;
+		} catch {
+			// A file that does not parse names nothing.
+		}
+	}
+
+	return undefined;
+};
+
 const turnSkillOn = async (
 	$: EngineInterface,
 	skill: SkillEntry,
 ): Promise<void> => {
 	const removed = await removeOverrides($, overrideKeysOf(skill));
+	const inRepo = await repoOverrideFile($, overrideKeysOf(skill));
 	void say(
 		$,
-		removed > 0
-			? `Turned ${skill.name} on`
-			: `No settings file had ${skill.name} turned off`,
+		inRepo
+			? `${skill.name} is turned off in this project's ${inRepo}; Loadout doesn't change repo files`
+			: removed > 0
+				? `Turned ${skill.name} on`
+				: `No settings file had ${skill.name} turned off`,
 	);
 	await rescan($);
 };
 
 const removeStale = async ($: EngineInterface, key: string): Promise<void> => {
 	const removed = await removeOverrides($, [key]);
+	const inRepo = await repoOverrideFile($, [key]);
 	void say(
 		$,
-		removed > 0
-			? `Removed "${key}" from skillOverrides`
-			: `"${key}" was not found`,
+		inRepo
+			? `"${key}" is set in this project's ${inRepo}; Loadout doesn't change repo files`
+			: removed > 0
+				? `Removed "${key}" from skillOverrides`
+				: `"${key}" was not found`,
 	);
 	await rescan($);
 };
@@ -1479,6 +1616,250 @@ const renameSkillFile = async (
 	await rescan($);
 };
 
+// A skill the person added to claude.ai is on the Yours list of the app's
+// skills page, /customize/skills/yours (claude.ai's own sub-route for it),
+// opened in the desktop app through its claude:// link.
+// A Claude Code plugin's own page in the desktop app's Customize > Plugins,
+// addressed by name@marketplace (the app's deep link route accepts it); a
+// plugin from a local folder is in no marketplace, so the Yours list.
+const openPluginPage = async (
+	$: EngineInterface,
+	plugin: PluginInfo,
+): Promise<void> => {
+	const isAddressable =
+		plugin.marketplace !== undefined &&
+		/^[A-Za-z0-9][\w.-]*$/.test(plugin.name) &&
+		/^[A-Za-z0-9][\w.-]*$/.test(plugin.marketplace);
+	const route = isAddressable
+		? `/customize/plugins/${plugin.name}%40${plugin.marketplace}`
+		: '/customize/plugins/yours';
+	const code = await $.process
+		.run(['open', `claude://claude.ai${route}`])
+		.then((result) => result.exitCode)
+		.catch(() => 1);
+	if (code !== 0) void say($, 'Could not open it in the Claude app');
+};
+
+const openAccountSkills = async ($: EngineInterface): Promise<void> => {
+	const code = await $.process
+		.run(['open', 'claude://claude.ai/customize/skills/yours'])
+		.then((result) => result.exitCode)
+		.catch(() => 1);
+	if (code !== 0) void say($, 'Could not open your skills in the Claude app');
+};
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const UPDATES_KEY = 'updateCheck';
+
+const partsOf = (version: string): number[] | undefined => {
+	const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
+
+	return match === null ? undefined : match.slice(1).map(Number);
+};
+
+// Plain x.y.z only; anything else is never called newer, so a bad file or a
+// commit-id version cannot nag.
+const isNewer = (latest: string, current: string): boolean => {
+	const a = partsOf(latest);
+	const b = partsOf(current);
+	if (a === undefined || b === undefined) return false;
+	const at = a.findIndex((part, index) => part !== b[index]);
+
+	return at !== -1 && (a[at] ?? 0) > (b[at] ?? 0);
+};
+
+const RAW = 'https://raw.githubusercontent.com';
+
+const githubRepoOf = (url: string): string | undefined =>
+	/^https:\/\/github\.com\/([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(url)?.[1];
+
+const fetchText = async (
+	$: EngineInterface,
+	url: string,
+): Promise<string | undefined> => {
+	const response = await $.http.fetch(url).catch(() => undefined);
+
+	return response?.ok ? response.text : undefined;
+};
+
+const versionIn = (text: string | undefined): string | undefined => {
+	if (text === undefined) return undefined;
+	try {
+		const version = (JSON.parse(text) as { version?: unknown }).version;
+		return typeof version === 'string' ? version : undefined;
+	} catch {
+		return undefined;
+	}
+};
+
+type MarketplaceEntry = { name?: unknown; version?: unknown; source?: unknown };
+
+// The newest version a marketplace offers for one plugin, the way Claude Code
+// resolves it: the marketplace's current list on GitHub, then the plugin.json
+// its entry points to (a folder of the marketplace repo, a repo of its own, or
+// a pinned commit).
+const latestVersionOf = async (
+	$: EngineInterface,
+	marketplaceRepo: string,
+	list: MarketplaceEntry[],
+	name: string,
+): Promise<string | undefined> => {
+	const entry = list.find((one) => one.name === name);
+	if (!entry) return undefined;
+	if (typeof entry.version === 'string') return entry.version;
+	const source = entry.source;
+	if (typeof source === 'string') {
+		const path = source.replace(/^\.\//, '').replace(/\/$/, '');
+		return versionIn(
+			await fetchText(
+				$,
+				`${RAW}/${marketplaceRepo}/HEAD/${path ? `${path}/` : ''}.claude-plugin/plugin.json`,
+			),
+		);
+	}
+	if (!source || typeof source !== 'object') return undefined;
+	const spec = source as {
+		source?: unknown;
+		repo?: unknown;
+		url?: unknown;
+		sha?: unknown;
+		ref?: unknown;
+		path?: unknown;
+	};
+	const repo =
+		spec.source === 'github' && typeof spec.repo === 'string'
+			? spec.repo
+			: typeof spec.url === 'string'
+				? githubRepoOf(spec.url)
+				: undefined;
+	if (!repo) return undefined;
+	const ref =
+		typeof spec.sha === 'string'
+			? spec.sha
+			: typeof spec.ref === 'string'
+				? spec.ref
+				: 'HEAD';
+	const sub =
+		typeof spec.path === 'string'
+			? `${spec.path.replace(/^\.?\//, '').replace(/\/$/, '')}/`
+			: '';
+
+	return versionIn(
+		await fetchText(
+			$,
+			`${RAW}/${repo}/${ref}/${sub}.claude-plugin/plugin.json`,
+		),
+	);
+};
+
+// Once a day: every marketplace-installed plugin's newest version against the
+// one installed. Stamped before fetching, so an offline Mac is not asked again
+// every session. Read-only: nothing is installed or changed here.
+const checkForUpdates = async (
+	$: EngineInterface,
+	isForced = false,
+): Promise<void> => {
+	const now = Date.now();
+	const last = (await $.store.get(UPDATES_KEY)) as
+		| { at?: unknown }
+		| undefined;
+	if (!isForced && typeof last?.at === 'number' && now - last.at < DAY_MS)
+		return;
+	await $.store.set(UPDATES_KEY, { at: now });
+
+	const home = (await $.env.get('HOME')) ?? '';
+	const readJson = async (file: string): Promise<unknown> =>
+		JSON.parse(String(await $.fs.read(file).catch(() => '{}')));
+	const installed =
+		(
+			(await readJson(
+				`${home}/.claude/plugins/installed_plugins.json`,
+			)) as {
+				plugins?: Record<string, Array<{ version?: unknown }>>;
+			}
+		).plugins ?? {};
+	const known = (await readJson(
+		`${home}/.claude/plugins/known_marketplaces.json`,
+	)) as Record<string, { source?: { source?: unknown; repo?: unknown } }>;
+
+	const found: PluginUpdates = {};
+	const lists = new Map<string, MarketplaceEntry[]>();
+	for (const [key, installs] of Object.entries(installed)) {
+		const [name, marketplace] = key.split('@');
+		const current = installs[0]?.version;
+		const repo = marketplace ? known[marketplace]?.source?.repo : undefined;
+		if (
+			!name ||
+			!marketplace ||
+			typeof current !== 'string' ||
+			typeof repo !== 'string'
+		)
+			continue;
+		if (known[marketplace]?.source?.source !== 'github') continue;
+		if (!lists.has(marketplace)) {
+			const text = await fetchText(
+				$,
+				`${RAW}/${repo}/HEAD/.claude-plugin/marketplace.json`,
+			);
+			let list: MarketplaceEntry[] = [];
+			try {
+				list = text
+					? ((JSON.parse(text) as { plugins?: MarketplaceEntry[] })
+							.plugins ?? [])
+					: [];
+			} catch {
+				list = [];
+			}
+			lists.set(marketplace, list);
+		}
+		const latest = await latestVersionOf(
+			$,
+			repo,
+			lists.get(marketplace) ?? [],
+			name,
+		);
+		if (latest && isNewer(latest, current))
+			found[key] = { current, latest };
+	}
+
+	await update($, updates, () => found);
+	const count = Object.keys(found).length;
+	if (count > 0) {
+		$.ui.toast(
+			`${count === 1 ? '1 plugin update is' : `${count} plugin updates are`} available: open /loadout`,
+			{ timeoutMs: 12_000 },
+		);
+	}
+};
+
+// Updates one plugin through Claude Code itself: its marketplace's list, then
+// the plugin. A restart applies it.
+const updatePlugin = async (
+	$: EngineInterface,
+	key: string,
+	surface: CopySurface,
+): Promise<void> => {
+	const marketplace = key.split('@')[1] ?? '';
+	await runClaude(
+		$,
+		['plugin', 'marketplace', 'update', marketplace],
+		surface,
+	);
+	const isUpdated = await runClaude($, ['plugin', 'update', key], surface);
+	if (isUpdated) {
+		await update($, updates, (all) =>
+			Object.fromEntries(
+				Object.entries(all).filter(([one]) => one !== key),
+			),
+		);
+		void say(
+			$,
+			`Updated ${key.split('@')[0]}. Restart Claude to use the new version`,
+		);
+	}
+	await rescan($);
+};
+
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
 
 const countOff = (skills: SkillEntry[]): number =>
@@ -1506,6 +1887,7 @@ export const register: Register = (on) => {
 		});
 		void loadUsage($);
 		void rescan($);
+		void checkForUpdates($).catch(() => undefined);
 
 		return next(e);
 	});
@@ -1532,6 +1914,7 @@ export const register: Register = (on) => {
 		const used = await read($, usage);
 		const waiting = await read($, confirm);
 		const shownNotice = await read($, notice);
+		const available = await read($, updates);
 
 		if (!data) {
 			return (
@@ -1556,27 +1939,48 @@ export const register: Register = (on) => {
 			const duplicate = skill.problems.find(
 				(problem) => problem.code === 'duplicate',
 			);
+			const pluginInfo =
+				skill.source === 'plugin'
+					? data.plugins.find((plugin) => plugin.name === skill.group)
+					: undefined;
+			// Only Local and Project skills are yours to open and edit: plugin files
+			// are a cache or a repo of their own, account skills a synced copy.
+			const isEditable =
+				skill.source === 'user' || skill.source === 'project';
 			// Open: the SKILL.md in VS Code, or the default text editor.
-			const edit = skill.file && (
+			const edit = isEditable && skill.file && (
 				<Button
 					key={`edit:${skill.id}`}
 					label="VS Code ↗"
 					onPress={() => void openFile($, skill.file ?? '')}
 				/>
 			);
-			const finder = skill.folder && skill.kind !== 'command' && (
+			const finder = isEditable && skill.folder && (
 				<Button
 					key={`reveal:${skill.id}`}
 					label="Finder ↗"
 					onPress={() => void reveal($, skill.folder ?? '')}
 				/>
 			);
-			// Remove is on every Local and Project skill, and picks the way that
-			// undoes how it got there: npx skills, a shortcut, or a real folder.
+			const account = skill.source === 'synced' && skill.isAccountOwn && (
+				<Button
+					key={`account:${skill.id}`}
+					label="Skills ↗"
+					onPress={() => void openAccountSkills($)}
+				/>
+			);
+			const pluginPage = pluginInfo && (
+				<Button
+					key={`plugin-page:${skill.id}`}
+					label="Plugins ↗"
+					onPress={() => void openPluginPage($, pluginInfo)}
+				/>
+			);
+			// Remove is on every Local skill, and picks the way that undoes how it got
+			// there: npx skills, a shortcut, or a real folder. A Project skill is the
+			// repo's: it is removed through git, not here.
 			const canDelete =
-				data.isMac &&
-				Boolean(skill.folder) &&
-				['user', 'project'].includes(skill.source);
+				data.isMac && Boolean(skill.folder) && skill.source === 'user';
 			const deleteKey = `delete:${skill.id}`;
 			const remove =
 				canDelete &&
@@ -1678,6 +2082,8 @@ export const register: Register = (on) => {
 					),
 					edit,
 					finder,
+					account,
+					pluginPage,
 					turnOn,
 					turnOff,
 					remove,
@@ -1688,10 +2094,13 @@ export const register: Register = (on) => {
 
 			const folderName = folder.slice(folder.lastIndexOf('/') + 1);
 			const writes = (fix: () => Promise<void>) => () => void fix();
+			// Fixes write files, so only on Local skills: a Project skill's files are
+			// the repo's, fixed by hand.
+			const isLocal = skill.source === 'user';
 
 			// A flagged skill leads with what fixes it; Open and Finder follow.
 			return [
-				has(skill, 'no-skill-md') && folder && (
+				isLocal && has(skill, 'no-skill-md') && folder && (
 					<Button
 						key={`create:${skill.id}`}
 						variant="primary"
@@ -1701,7 +2110,7 @@ export const register: Register = (on) => {
 						)}
 					/>
 				),
-				has(skill, 'no-frontmatter') && skill.file && (
+				isLocal && has(skill, 'no-frontmatter') && skill.file && (
 					<Button
 						key={`frontmatter:${skill.id}`}
 						variant="primary"
@@ -1711,21 +2120,24 @@ export const register: Register = (on) => {
 						)}
 					/>
 				),
-				has(skill, 'lowercase-file') && skill.lowercaseFile && (
-					<Button
-						key={`rename:${skill.id}`}
-						variant="primary"
-						label="Rename to SKILL.md"
-						onPress={writes(() =>
-							renameSkillFile(
-								$,
-								folder,
-								skill.lowercaseFile ?? '',
-							),
-						)}
-					/>
-				),
-				has(skill, 'broken-link') &&
+				isLocal &&
+					has(skill, 'lowercase-file') &&
+					skill.lowercaseFile && (
+						<Button
+							key={`rename:${skill.id}`}
+							variant="primary"
+							label="Rename to SKILL.md"
+							onPress={writes(() =>
+								renameSkillFile(
+									$,
+									folder,
+									skill.lowercaseFile ?? '',
+								),
+							)}
+						/>
+					),
+				isLocal &&
+					has(skill, 'broken-link') &&
 					folder &&
 					(waiting === skill.id ? (
 						[
@@ -1815,6 +2227,8 @@ export const register: Register = (on) => {
 				),
 				edit,
 				finder,
+				account,
+				pluginPage,
 				!has(skill, 'broken-link') && turnOn,
 				!has(skill, 'broken-link') && turnOff,
 				!has(skill, 'broken-link') && remove,
@@ -1840,9 +2254,12 @@ export const register: Register = (on) => {
 
 		const details = (skill: SkillEntry) => {
 			const isCosted = skill.tokens !== undefined;
-			const cost = skill.isOff
-				? `≈ ${skill.tokens} tokens, none while off`
-				: `≈ ${skill.tokens} tokens every session`;
+			const cost =
+				skill.tokens === 0
+					? "None: not in Claude's context"
+					: skill.isOff
+						? `≈ ${skill.tokens} tokens, none while off`
+						: `≈ ${skill.tokens} tokens every session`;
 
 			return (
 				<Box flexDirection="column" marginTop={1}>
@@ -1925,7 +2342,7 @@ export const register: Register = (on) => {
 								flexDirection="row"
 								flexWrap="wrap"
 								gap={1}
-								marginTop={1}
+								marginTop={skill.kind === 'command' ? 'xs' : 1}
 							>
 								{actions(skill)}
 							</Box>
@@ -1984,6 +2401,7 @@ export const register: Register = (on) => {
 			isForced: boolean,
 			tags?: string,
 			tally?: string,
+			badge?: string,
 		) => {
 			const isOpen = isForced || expanded.includes(id);
 			const issues = skills.filter(
@@ -2010,6 +2428,11 @@ export const register: Register = (on) => {
 						{isForced && (
 							<Text>{`▾ ${label} (${tally ?? skills.length})`}</Text>
 						)}
+						{badge && (
+							<Text color="warning" size="caption">
+								{badge}
+							</Text>
+						)}
 						{!isOpen && issues > 0 && (
 							<Text color="warning" size="caption">
 								⚠ {issues}
@@ -2028,11 +2451,29 @@ export const register: Register = (on) => {
 			);
 		};
 
+		// What a plugin adds to every session: its skills that are on, and any
+		// commands written as files.
+		const pluginCost = (plugin: PluginInfo): string => {
+			const total = [...data.skills, ...data.commands]
+				.filter(
+					(one) =>
+						one.group === plugin.name && one.source === 'plugin',
+				)
+				.filter((one) => !one.isOff)
+				.reduce((sum, one) => sum + (one.tokens ?? 0), 0);
+			if (total === 0) return 'no context cost';
+
+			return total >= 1000
+				? `≈ ${(total / 1000).toFixed(1)}k tokens each session`
+				: `≈ ${total} tokens each session`;
+		};
+
 		const pluginTags = (plugin: PluginInfo): string =>
 			[
 				plugin.version ? `v${plugin.version}` : '',
 				plugin.author ? `by ${plugin.author}` : '',
-				plugin.origin === 'dev folder' ? 'dev folder' : '',
+				plugin.origin === 'dev folder' ? 'local folder' : '',
+				pluginCost(plugin),
 			]
 				.filter(Boolean)
 				.join(' · ');
@@ -2065,20 +2506,18 @@ export const register: Register = (on) => {
 		);
 
 		const all = data.skills;
-		const isLocal = (skill: SkillEntry) => skill.source !== 'synced';
 		const hasIssue = (skill: SkillEntry) => warningsOf(skill).length > 0;
 		// What every session pays for the skill listing: each skill that is on.
 		const tokenTotal = all
 			.filter((skill) => !skill.isOff)
 			.reduce((sum, skill) => sum + (skill.tokens ?? 0), 0);
 		const stale = data.staleOverrides ?? [];
-		const local = all.filter(isLocal);
 		const counts: Record<SkillFilter, number> = {
 			local: all.length,
 			user: all.filter((skill) => skill.source === 'user').length,
 			project: all.filter((skill) => skill.source === 'project').length,
 			plugin: data.plugins.length,
-			off: local.filter((skill) => skill.isOff).length,
+			off: all.filter((skill) => skill.isOff).length,
 			issues: all.filter(hasIssue).length + stale.length,
 			synced: all.filter((skill) => skill.source === 'synced').length,
 		};
@@ -2098,7 +2537,7 @@ export const register: Register = (on) => {
 		const chosen: SkillFilter = isEmptyChip(picked) ? 'local' : picked;
 		const keeps = (skill: SkillEntry): boolean => {
 			if (chosen === 'local') return true;
-			if (chosen === 'off') return isLocal(skill) && skill.isOff;
+			if (chosen === 'off') return skill.isOff;
 			if (chosen === 'issues') return hasIssue(skill);
 
 			return skill.source === chosen;
@@ -2157,7 +2596,12 @@ export const register: Register = (on) => {
 						<Button
 							label="Refresh"
 							dimColor
-							onPress={() => void rescan($)}
+							onPress={() => {
+								void rescan($);
+								void checkForUpdates($, true).catch(
+									() => undefined,
+								);
+							}}
 						/>
 					</Box>
 				</Box>
@@ -2170,6 +2614,30 @@ export const register: Register = (on) => {
 						>
 							{`${shownNotice.isError ? '⚠' : '✓'} ${shownNotice.text}`}
 						</Text>
+					</Box>
+				)}
+
+				{Object.keys(available).length > 0 && (
+					<Box flexDirection="column" marginTop="xs">
+						{Object.entries(available).map(([key, version]) => (
+							<Box
+								key={`update-row:${key}`}
+								flexDirection="row"
+								alignItems="center"
+								gap={1}
+							>
+								<Text color="warning" size="footnote">
+									{`⬆ ${key.split('@')[0]} ${version.latest} is out (you have ${version.current})`}
+								</Text>
+								<Button
+									key={`update:${key}`}
+									label="Update"
+									onPress={(press) =>
+										void updatePlugin($, key, press.surface)
+									}
+								/>
+							</Box>
+						))}
 					</Box>
 				)}
 
@@ -2244,6 +2712,10 @@ export const register: Register = (on) => {
 							.filter(Boolean)
 							.join(' · ');
 
+						const newer = plugin.marketplace
+							? available[`${plugin.name}@${plugin.marketplace}`]
+							: undefined;
+
 						return fold(
 							`group:${plugin.name}`,
 							plugin.name,
@@ -2251,6 +2723,7 @@ export const register: Register = (on) => {
 							isAcross,
 							pluginTags(plugin),
 							tally,
+							newer ? `⬆ ${newer.latest} available` : undefined,
 						);
 					})}
 
@@ -2282,16 +2755,22 @@ export const register: Register = (on) => {
 				{openSynced &&
 					synced.length === 0 &&
 					note('No synced account skills.')}
-				{openSynced && !isAll && synced.map(row)}
 				{openSynced &&
-					isAll &&
-					synced.length > 0 &&
-					fold(
-						'group:synced',
-						'Show synced account skills',
-						synced,
-						false,
-					)}
+					ACCOUNT_GROUPS.map(([group, label]) => {
+						const members = synced.filter(
+							(skill) => skill.accountGroup === group,
+						);
+
+						return (
+							members.length > 0 &&
+							fold(
+								`group:synced-${group}`,
+								label,
+								members,
+								!isAll,
+							)
+						);
+					})}
 
 				{shownStale.length > 0 &&
 					heading(

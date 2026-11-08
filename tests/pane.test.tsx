@@ -103,6 +103,11 @@ const FILES: Record<string, Node> = {
 		kind: 'file',
 		text: skill('hidden', 'Never listed.'),
 	},
+	'/dev/mover/hooks/hooks.json': {
+		kind: 'file',
+		text: '{"modules":["./register.tsx"]}',
+	},
+	'/dev/mover/hooks/register.tsx': { kind: 'file', text: '' },
 	'/dev/mover/.claude-plugin/plugin.json': {
 		kind: 'file',
 		text: '{"name":"mover","version":"0.1.0"}',
@@ -117,11 +122,18 @@ const FILES: Record<string, Node> = {
 		text: JSON.stringify({
 			lastUpdated: 1794090077312,
 			skills: [
-				{ name: 'pdf', description: 'Work with PDFs.', enabled: true },
+				{
+					name: 'pdf',
+					description: 'Work with PDFs.',
+					enabled: true,
+					source: 'anthropic',
+				},
 				{
 					name: 'cr',
 					description: 'An account copy of cr.',
 					enabled: true,
+					creatorType: 'user',
+					backingPluginId: 'plugin_1',
 				},
 				{
 					name: 'old',
@@ -164,6 +176,9 @@ const childrenOf = (files: Record<string, Node>, path: string) =>
 			mtimeMs: 0,
 			isLink: Boolean(node.linkTo),
 		}));
+
+// What GitHub answers in a test: raw file text by URL; anything else is a 404.
+let WEB: Record<string, string> = {};
 
 type Engine = {
 	draft: string;
@@ -247,6 +262,18 @@ function engine(
 		};
 	});
 	on('fs.exists', (_, e) => ({ value: Boolean(files[e.path]) }));
+	on('http.fetch', (_, e) => {
+		const text = WEB[e.url];
+
+		return {
+			value: {
+				ok: text !== undefined,
+				status: text !== undefined ? 200 : 404,
+				headers: {},
+				text: text ?? '',
+			},
+		};
+	});
 	on('fs.write', (_, e) => {
 		state.writes[e.path] = e.text;
 
@@ -326,15 +353,22 @@ test('All lists every source, flags problems and leaves disabled things out', as
 	expect(
 		(await ui.find({ type: 'Button', key: 'fold:group:mover' }))?.text,
 	).toBe('▸ mover (1 command)');
-	expect(await ui.find({ type: 'Text', text: /dev folder/ })).toBeUndefined();
+	expect(
+		await ui.find({ type: 'Text', text: /local folder/ }),
+	).toBeUndefined();
 	await ui.press({ key: 'fold:group:mover' });
-	expect((await ui.find({ type: 'Text', text: /dev folder/ }))?.text).toBe(
-		'v0.1.0 · dev folder',
+	expect((await ui.find({ type: 'Text', text: /local folder/ }))?.text).toBe(
+		'v0.1.0 · local folder · no context cost',
 	);
 	expect(await ui.find({ type: 'Text', text: /disabled/ })).toBeUndefined();
 	expect(
-		(await ui.find({ type: 'Button', key: 'fold:group:synced' }))?.text,
-	).toBe('▸ Show synced account skills (2)');
+		(await ui.find({ type: 'Button', key: 'fold:group:synced-yours' }))
+			?.text,
+	).toBe('▸ Yours (1)');
+	expect(
+		(await ui.find({ type: 'Button', key: 'fold:group:synced-documents' }))
+			?.text,
+	).toBe('▸ Anthropic document skills (1)');
 	await ui.unmount();
 });
 
@@ -1073,8 +1107,300 @@ test('each plugin shows its author', async ($, on) => {
 	const ui = await mount($);
 	expect(await ui.find({ type: 'Text', text: /Tool Maker/ })).toBeUndefined();
 	await ui.press({ key: 'fold:group:tools' });
-	expect((await ui.find({ type: 'Text', text: /Tool Maker/ }))?.text).toBe(
-		'v1.2.0 · by Tool Maker',
+	expect((await ui.find({ type: 'Text', text: /Tool Maker/ }))?.text).toMatch(
+		/^v1\.2\.0 · by Tool Maker · ≈ \d+ tokens each session$/,
 	);
+	await ui.unmount();
+});
+
+test('the Off chip includes claude.ai account skills that are off', async ($, on) => {
+	engine(on, FILES, {
+		...SETTINGS,
+		skillOverrides: { cr: 'off', 'anthropic-skills:pdf': 'off' },
+	});
+	const ui = await mount($);
+	expect((await ui.find({ type: 'Button', key: 'chip:off' }))?.text).toBe(
+		'Off 2',
+	);
+	await ui.press({ key: 'chip:off' });
+	expect(
+		(await ui.find({ type: 'Button', key: 'row:synced:account:pdf' }))
+			?.text,
+	).toBe('▸ pdf');
+	await ui.unmount();
+});
+
+test('only your own account skills link to claude.ai, and say so', async ($, on) => {
+	const state = engine(on);
+	const ui = await mount($);
+	await ui.press({ key: 'chip:synced' });
+
+	await ui.press({ key: 'row:synced:account:pdf' });
+	expect((await ui.find({ type: 'Text', text: /every account/ }))?.text).toBe(
+		'From Anthropic, on every account',
+	);
+	expect(
+		await ui.find({ type: 'Button', key: 'account:synced:account:pdf' }),
+	).toBeUndefined();
+
+	await ui.press({ key: 'row:synced:account:cr' });
+	expect(
+		(await ui.find({ type: 'Text', text: 'Your claude.ai skill' }))?.text,
+	).toBe('Your claude.ai skill');
+	expect(
+		(await ui.find({ type: 'Button', key: 'account:synced:account:cr' }))
+			?.text,
+	).toBe('Skills ↗');
+	await ui.press({ key: 'account:synced:account:cr' });
+	expect(state.runs).toContainEqual([
+		'open',
+		'claude://claude.ai/customize/skills/yours',
+	]);
+	expect(state.fills).toEqual([]);
+	await ui.unmount();
+});
+
+test('an expanded plugin links to its page, and its commands show their source', async ($, on) => {
+	const state = engine(on);
+	const ui = await mount($);
+	await ui.press({ key: 'fold:group:tools' });
+	expect(
+		await ui.find({ type: 'Button', key: 'plugin-page:tools' }),
+	).toBeUndefined();
+	await ui.press({ key: 'row:plugin:tools:plan' });
+	await ui.press({ key: 'plugin-page:plugin:tools:plan' });
+	expect(state.runs).toContainEqual([
+		'open',
+		'claude://claude.ai/customize/plugins/tools%40market',
+	]);
+
+	await ui.press({ key: 'fold:group:mover' });
+	await ui.press({ key: 'row:command:mover:move-me' });
+	await ui.press({ key: 'plugin-page:command:mover:move-me' });
+	expect(state.runs).toContainEqual([
+		'open',
+		'claude://claude.ai/customize/plugins/yours',
+	]);
+	expect(
+		(await ui.find({ type: 'Text', text: 'mover plugin · local folder' }))
+			?.text,
+	).toBe('mover plugin · local folder');
+	await ui.unmount();
+});
+
+test('a command registered in code shows it costs nothing in context', async ($, on) => {
+	engine(on);
+	const ui = await mount($);
+	await ui.press({ key: 'fold:group:mover' });
+	await ui.press({ key: 'row:command:mover:move-me' });
+	expect((await ui.find({ type: 'Text', text: /not in Claude/ }))?.text).toBe(
+		"None: not in Claude's context",
+	);
+	expect(
+		(await ui.find({ type: 'Text', text: '/dev/mover/hooks/register.tsx' }))
+			?.text,
+	).toBe('/dev/mover/hooks/register.tsx');
+	await ui.unmount();
+});
+
+test('only Local and Project skills get VS Code and Finder', async ($, on) => {
+	engine(on);
+	const ui = await mount($);
+	await ui.press({ key: 'row:user:user:gac' });
+	expect(
+		(await ui.find({ type: 'Button', key: 'edit:user:user:gac' }))?.text,
+	).toBe('VS Code ↗');
+	expect(
+		(await ui.find({ type: 'Button', key: 'reveal:user:user:gac' }))?.text,
+	).toBe('Finder ↗');
+
+	await ui.press({ key: 'fold:group:tools' });
+	await ui.press({ key: 'row:plugin:tools:plan' });
+	expect(
+		await ui.find({ type: 'Button', key: 'edit:plugin:tools:plan' }),
+	).toBeUndefined();
+	expect(
+		await ui.find({ type: 'Button', key: 'reveal:plugin:tools:plan' }),
+	).toBeUndefined();
+
+	await ui.press({ key: 'fold:group:mover' });
+	await ui.press({ key: 'row:command:mover:move-me' });
+	expect(
+		await ui.find({ type: 'Button', key: 'edit:command:mover:move-me' }),
+	).toBeUndefined();
+	expect(
+		await ui.find({ type: 'Button', key: 'reveal:command:mover:move-me' }),
+	).toBeUndefined();
+	expect(
+		(
+			await ui.find({
+				type: 'Button',
+				key: 'plugin-page:command:mover:move-me',
+			})
+		)?.text,
+	).toBe('Plugins ↗');
+	await ui.unmount();
+});
+
+test('a project skill is listed under Project, with no Trash', async ($, on) => {
+	engine(on, {
+		...FILES,
+		'/project/.claude/skills': { kind: 'dir' },
+		'/project/.claude/skills/deploy-check': { kind: 'dir' },
+		'/project/.claude/skills/deploy-check/SKILL.md': {
+			kind: 'file',
+			text: skill(
+				'deploy-check',
+				'Check a deploy before it goes out, for this repo only.',
+			),
+		},
+	});
+	const ui = await mount($);
+	expect(
+		await ui.find({ type: 'Text', text: 'None in this project.' }),
+	).toBeUndefined();
+	await ui.press({ key: 'row:project:project:deploy-check' });
+	expect(
+		(await ui.find({ type: 'Text', text: /shared with everyone/ }))?.text,
+	).toBe('project repo · shared with everyone who clones it');
+	for (const [key, label] of [
+		['insert', 'Insert'],
+		['edit', 'VS Code ↗'],
+		['reveal', 'Finder ↗'],
+		['turn-off', 'Turn off'],
+	]) {
+		expect(
+			(
+				await ui.find({
+					type: 'Button',
+					key: `${key}:project:project:deploy-check`,
+				})
+			)?.text,
+		).toBe(label);
+	}
+	expect(
+		await ui.find({
+			type: 'Button',
+			key: 'delete:project:project:deploy-check',
+		}),
+	).toBeUndefined();
+	await ui.press({ key: 'chip:project' });
+	expect(
+		(
+			await ui.find({
+				type: 'Button',
+				key: 'row:project:project:deploy-check',
+			})
+		)?.text,
+	).toBe('▾ deploy-check');
+	await ui.unmount();
+});
+
+test('a project skill with a problem gets no fixes that write, and Turn on leaves repo settings alone', async ($, on) => {
+	const state = engine(
+		on,
+		{
+			...FILES,
+			'/project/.claude/skills': { kind: 'dir' },
+			'/project/.claude/skills/bare': { kind: 'dir' },
+			'/project/.claude/skills/bare/SKILL.md': {
+				kind: 'file',
+				text: 'No frontmatter here.\n',
+			},
+			'/project/.claude/settings.json': {
+				kind: 'file',
+				text: '{\n  "skillOverrides": { "bare": "off" }\n}\n',
+			},
+		},
+		{ ...SETTINGS, skillOverrides: { bare: 'off' } },
+	);
+	const ui = await mount($);
+	await ui.press({ key: 'row:project:project:bare' });
+	expect(
+		await ui.find({
+			type: 'Button',
+			key: 'frontmatter:project:project:bare',
+		}),
+	).toBeUndefined();
+	await ui.press({ key: 'turn-on:project:project:bare' });
+	expect(state.writes['/project/.claude/settings.json']).toBeUndefined();
+	expect(
+		(await ui.find({ type: 'Text', text: /doesn't change repo files/ }))
+			?.text,
+	).toMatch(/bare is turned off in this project's \.claude\/settings\.json/);
+	await ui.unmount();
+});
+
+test('a newer plugin version shows with an Update button that updates it through Claude Code', async ($, on) => {
+	const RAW = 'https://raw.githubusercontent.com';
+	WEB = {
+		[`${RAW}/owner/market/HEAD/.claude-plugin/marketplace.json`]:
+			JSON.stringify({
+				plugins: [
+					{
+						name: 'tools',
+						source: { source: 'github', repo: 'owner/tools' },
+					},
+				],
+			}),
+		[`${RAW}/owner/tools/HEAD/.claude-plugin/plugin.json`]:
+			'{"name":"tools","version":"1.3.0"}',
+	};
+	const state = engine(on, {
+		...FILES,
+		[`${HOME}/.claude/plugins/known_marketplaces.json`]: {
+			kind: 'file',
+			text: JSON.stringify({
+				market: { source: { source: 'github', repo: 'owner/market' } },
+			}),
+		},
+	});
+	const ui = await mount($);
+
+	expect((await ui.find({ type: 'Text', text: /is out/ }))?.text).toBe(
+		'⬆ tools 1.3.0 is out (you have 1.2.0)',
+	);
+	expect((await ui.find({ type: 'Text', text: /available$/ }))?.text).toBe(
+		'⬆ 1.3.0 available',
+	);
+	await ui.press({ key: 'update:tools@market' });
+	expect(state.runs).toContainEqual([
+		'claude',
+		'plugin',
+		'marketplace',
+		'update',
+		'market',
+	]);
+	expect(state.runs).toContainEqual([
+		'claude',
+		'plugin',
+		'update',
+		'tools@market',
+	]);
+	expect(await ui.find({ type: 'Text', text: /is out/ })).toBeUndefined();
+	WEB = {};
+	await ui.unmount();
+});
+
+test('an older or non-numbered remote version is never shown as an update', async ($, on) => {
+	const RAW = 'https://raw.githubusercontent.com';
+	WEB = {
+		[`${RAW}/owner/market/HEAD/.claude-plugin/marketplace.json`]:
+			JSON.stringify({
+				plugins: [{ name: 'tools', version: 'abc123' }],
+			}),
+	};
+	engine(on, {
+		...FILES,
+		[`${HOME}/.claude/plugins/known_marketplaces.json`]: {
+			kind: 'file',
+			text: JSON.stringify({
+				market: { source: { source: 'github', repo: 'owner/market' } },
+			}),
+		},
+	});
+	const ui = await mount($);
+	expect(await ui.find({ type: 'Text', text: /is out/ })).toBeUndefined();
+	WEB = {};
 	await ui.unmount();
 });
