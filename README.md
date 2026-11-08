@@ -49,12 +49,12 @@ The desktop app's **Customize → Skills** page only lists your claude.ai accoun
 - **Insert**: puts the skill's command at the start of the prompt box, keeping what you typed after it. It never sends. Flagged skills show their fixes instead, and skills that are off have no Insert.
 - **Turn on**: on a skill that is off, removes its `"off"` entry from `skillOverrides`, so it's on straight away.
 - **Turn off**: on a skill that is on, sets it to `"off"` in `skillOverrides` of `~/.claude/settings.json`, the way `/skills` does. The files stay; Claude Code just stops using it until you **Turn on** again.
-- **Uninstall / Delete shortcut / Move to Trash** (macOS): on any Local or Project skill, after you confirm, takes the skill off your machine the way it got there. Unlike Turn off, the files go, to the Trash. A skill `npx skills` installed shows **Uninstall**: its shared folder in `~/.agents/skills` moves to the Trash, Claude Code's shortcut is deleted and its entry leaves `~/.agents/.skill-lock.json`. No Node or `npx` is needed; other tools' shortcuts to it, if any, stop working. A shortcut (symlink) shows **Delete shortcut**, which deletes only the shortcut. A real folder shows **Trash**. Its `"off"` entry is removed too.
+- **Uninstall / Delete shortcut / Move to Trash** (macOS): on any Local skill, after you confirm, takes the skill off your machine the way it got there. Unlike Turn off, the files go, to the Trash. A skill `npx skills` installed shows **Uninstall**: its shared folder in `~/.agents/skills` moves to the Trash, Claude Code's shortcut is deleted and its entry leaves `~/.agents/.skill-lock.json`. No Node or `npx` is needed; other tools' shortcuts to it, if any, stop working. A shortcut (symlink) shows **Delete shortcut**, which deletes only the shortcut. A real folder shows **Trash**. Its `"off"` entry is removed too.
 - **Confirmations**: anything that removes something (Uninstall, Delete shortcut, Move to Trash, Remove link, Uninstall plugin) asks first in Claude Code's own dialog. Where that dialog can't open, for example while Claude is mid-turn, the row shows an inline confirm with **Cancel** instead.
 - **What just happened** shows as a line at the top of the pane ("✓ Turned typesafe-ai on") for a few seconds.
 - **If Claude Code can't be run** for Uninstall plugin, the command is copied for you to paste into a terminal instead.
-- **VS Code ↗**: opens the skill's `SKILL.md` in VS Code, or in your default text editor when VS Code isn't installed
-- **Finder ↗**: shows the skill's folder in Finder
+- **VS Code ↗** (Local and Project skills): opens the skill's `SKILL.md` in VS Code, or in your default text editor when VS Code isn't installed
+- **Finder ↗** (Local and Project skills): shows the skill's folder in Finder
 - **Usage counts**: how often each skill ran and when it last did, kept across sessions
 
 ## Requirements
@@ -110,7 +110,7 @@ claude plugin uninstall loadout@claude-loadout
 | OFF | `skillOverrides` in your merged settings |
 
 > [!NOTE]
-> **Turn on**, **Delete** and **Remove from settings** edit `skillOverrides` in the settings file that holds the entry: `~/.claude/settings.json`, or the project's `.claude/settings.json` or `.claude/settings.local.json`. Only those entries change. The rest of the file, its key order and its indentation stay as they were, and the file is read back to check it's still valid JSON. Loadout reads the file on your machine only: its contents never go to Claude.
+> **Turn on**, **Turn off**, the remove buttons and **Remove from settings** only ever edit `skillOverrides` in your own `~/.claude/settings.json`. **Loadout never writes inside a repo**: if a skill is turned off in a project's `.claude/settings.json` or `.claude/settings.local.json`, the pane says so and leaves it. Fix buttons that write files (Create SKILL.md, Add frontmatter, Rename, Remove link) are for Local skills only. Only those entries change: the rest of the file, its key order and its indentation stay as they were, and the file is read back to check it's still valid JSON. Loadout reads the file on your machine only: its contents never go to Claude.
 
 > [!NOTE]
 > `~/.claude/skills/synced/` is an older copy of your account skills that the app stops updating. loadout reads the app's current copy instead, so a skill you removed from your account doesn't linger. That folder is the app's own and undocumented. If an update moves it, the claude.ai account section shows none until loadout catches up.

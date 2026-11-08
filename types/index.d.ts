@@ -55,6 +55,10 @@ export type SkillEntry = {
 	origin?: string;
 	/** The name `npx skills` installed it under, when it did. */
 	npxName?: string;
+	/** A claude.ai account skill the person made, as opposed to one Anthropic gives every account. */
+	isAccountOwn?: boolean;
+	/** Which group a claude.ai account skill is drawn in. */
+	accountGroup?: 'yours' | 'examples' | 'documents' | 'builtin';
 	/** A disabled plugin that ships a skill of the same name. */
 	offPlugin?: OffPlugin;
 	/** Set on a plugin's slash command, which is listed beside its skills. */
@@ -74,6 +78,8 @@ export type PluginInfo = {
 	name: string;
 	origin: 'marketplace' | 'dev folder';
 	path: string;
+	/** The plugin's folder, absolute. */
+	root?: string;
 	version?: string;
 	author?: string;
 	marketplace?: string;
