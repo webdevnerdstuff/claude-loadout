@@ -1609,3 +1609,17 @@ test('on the main screen /loadout names the setting that docks it beside the cha
 	} as Parameters<typeof $.command.run>[0]);
 	expect(full.text).toBe('Loadout opened.');
 });
+
+test('on the desktop the field’s own button is Clear, with no second one', async ($, on) => {
+	engine(on);
+	const ui = await mount($, 'desktop');
+	await ui.input({ key: 'search', text: 'commit', kind: 'change' });
+
+	expect(
+		(await ui.find({ type: 'Input', key: 'search' }))?.props.submitLabel,
+	).toBe('Clear');
+	expect(
+		await ui.find({ type: 'Button', key: 'search-clear' }),
+	).toBeUndefined();
+	await ui.unmount();
+});

@@ -1991,6 +1991,7 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 	const expanded = await read($, open);
 	const picked = await read($, filter);
 	const searched = await read($, query);
+	const isTerminal = e.surface === 'terminal';
 	const used = await read($, usage);
 	const waiting = await read($, confirm);
 	const shownNotice = await read($, notice);
@@ -2753,11 +2754,14 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 					key="search"
 					placeholder="Search skills and plugins"
 					value={searched}
-					submitLabel=""
+					// The desktop draws the field's own button with this label, so
+					// there it is the Clear button (Enter clears the search); the
+					// terminal draws it as a hint beside ⏎, and has its own Clear.
+					submitLabel={isTerminal ? '' : 'Clear'}
 					onInput={(value) => void update($, query, () => value)}
 					onSubmit={() => void update($, query, () => '')}
 				/>
-				{isSearching && (
+				{isTerminal && isSearching && (
 					<Button
 						key="search-clear"
 						label="Clear"
