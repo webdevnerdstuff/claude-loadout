@@ -1,8 +1,9 @@
 <!doctype html>
 <!--
-	A stand-in for the Loadout pane, drawn with made-up skills, for the README's screenshot.
-	Render it with docs/demo/render.sh, which writes docs/screenshot-light.png and -dark.png.
-	It follows the pane's layout in hooks/register.tsx: keep the two in step when that changes.
+	A stand-in for the Loadout pane as the Claude desktop app draws it (dark theme), with made-up
+	skills, for the README's screenshot. Render it with docs/demo/render.sh, which writes
+	docs/screenshot-dark.png. Colours and sizes are measured from the real pane: keep it in step
+	with hooks/register.tsx when the pane's layout changes.
 -->
 <html lang="en">
 	<head>
@@ -10,41 +11,24 @@
 		<title>Loadout demo</title>
 		<style>
 			:root {
-				--pane: #ffffff;
-				--border: #e3e1d9;
-				--text: #1f1e1d;
-				--dim: #6f6c66;
-				--faint: #a19e97;
-				--band: #80808026;
-				--chip: #f0eee8;
-				--chip-text: #3d3b38;
-				--primary: #c96442;
-				--primary-text: #ffffff;
-				--button: #f0eee8;
-				--button-border: #dedbd2;
-				--warning: #b26b00;
-				--error: #d1242f;
-				--success: #1a7f37;
-				--local: #4c9aff;
-				--project: #3fb950;
-				--plugin: #8250df;
-				--synced: #e8853d;
-			}
-			:root.dark {
-				--pane: #262624;
-				--border: #3a3936;
-				--text: #ecebe6;
-				--dim: #a3a09a;
-				--faint: #75726c;
-				--chip: #31302d;
-				--chip-text: #d6d4ce;
-				--primary: #d97757;
-				--button: #31302d;
-				--button-border: #44423e;
+				--pane: #191919;
+				--rule: #353535;
+				--text: #efefef;
+				--dim: #9c9c9c;
+				--button: #3b3b3b;
+				--button-dim: #aaaaaa;
+				--chosen: #efefef;
+				--chosen-text: #191919;
+				--field: #252525;
+				--field-border: #2e2e2e;
+				--placeholder: #7c7c7c;
+				--band: #282828;
 				--warning: #e3a33b;
 				--error: #f85149;
-				--success: #3fb950;
-				--plugin: #a371f7;
+				--local: #4c9aff;
+				--plugin: #b796ff;
+				--project: #3fb950;
+				--synced: #e8853d;
 			}
 			* {
 				box-sizing: border-box;
@@ -55,9 +39,9 @@
 				background: transparent;
 			}
 			body {
-				padding: 16px;
+				padding: 0;
 				font:
-					14px/1.45 -apple-system,
+					16px/1.5 -apple-system,
 					BlinkMacSystemFont,
 					'SF Pro Text',
 					'Helvetica Neue',
@@ -66,30 +50,30 @@
 				-webkit-font-smoothing: antialiased;
 			}
 			.pane {
-				width: 560px;
+				width: 800px;
 				background: var(--pane);
-				border: 1px solid var(--border);
 				border-radius: 12px;
 				overflow: hidden;
-				box-shadow: 0 8px 28px #0000001a;
 			}
 			.titlebar {
 				display: flex;
 				align-items: center;
 				justify-content: space-between;
-				padding: 10px 14px;
-				border-bottom: 1px solid var(--border);
-				font-weight: 600;
-				font-size: 13px;
+				height: 51px;
+				padding: 0 20px;
+				border-bottom: 1px solid var(--rule);
+				font-size: 17px;
 			}
-			.titlebar .x {
-				color: var(--faint);
-				font-weight: 400;
-				font-size: 16px;
-				line-height: 1;
+			.titlebar .icons {
+				display: flex;
+				gap: 22px;
+				color: var(--text);
+			}
+			.titlebar svg {
+				display: block;
 			}
 			.body {
-				padding: 12px 14px 16px;
+				padding: 20px 16px 24px;
 			}
 			.row {
 				display: flex;
@@ -99,69 +83,103 @@
 			.between {
 				justify-content: space-between;
 			}
-			.foot {
-				font-size: 12px;
+			.dim {
 				color: var(--dim);
 			}
-			.cap {
-				font-size: 11.5px;
-			}
-			.mono {
-				font-family: 'SF Mono', ui-monospace, Menlo, monospace;
-				font-size: 11.5px;
+			.small {
+				font-size: 15px;
 			}
 			.btn {
 				display: inline-flex;
 				align-items: center;
-				padding: 3px 10px;
-				border-radius: 6px;
+				height: 32px;
+				padding: 0 14px;
+				border-radius: 7px;
 				background: var(--button);
-				border: 1px solid var(--button-border);
-				font-size: 12.5px;
 				color: var(--text);
 				white-space: nowrap;
 			}
-			.btn.dim {
-				color: var(--dim);
+			.btn.quiet {
+				color: var(--button-dim);
 			}
-			.btn.primary {
-				background: var(--primary);
-				border-color: var(--primary);
-				color: var(--primary-text);
+			.btn.chosen {
+				background: var(--chosen);
+				color: var(--chosen-text);
 			}
 			.chips {
 				display: flex;
 				flex-wrap: wrap;
-				gap: 6px;
-				margin-top: 12px;
+				gap: 11px;
+				margin-top: 14px;
 			}
-			.chips .btn {
-				border-radius: 999px;
-				padding: 3px 11px;
+			.search {
+				display: flex;
+				gap: 10px;
+				margin-top: 14px;
 			}
-			.heading {
+			.field {
+				width: 216px;
+				height: 34px;
+				padding: 0 14px;
+				display: flex;
+				align-items: center;
+				border-radius: 7px;
+				background: var(--field);
+				border: 1px solid var(--field-border);
+				color: var(--placeholder);
+			}
+			.band {
 				display: flex;
 				align-items: center;
 				justify-content: space-between;
-				margin-top: 16px;
-				padding: 4px 8px;
+				height: 24px;
+				margin-top: 20px;
+				padding: 0 10px 0 11px;
 				background: var(--band);
-				border-radius: 6px;
 			}
-			.heading .label {
-				font-weight: 600;
-				font-size: 12.5px;
-				letter-spacing: 0.04em;
+			.band .left {
+				display: flex;
+				align-items: center;
+			}
+			.band .dot {
+				margin-right: 15px;
+			}
+			.band .path {
+				margin-left: 20px;
+			}
+			.dot {
+				display: inline-block;
+				width: 13px;
+				height: 13px;
+				border-radius: 50%;
+			}
+			.tri {
+				display: inline-block;
+				width: 10px;
+				font-size: 8px;
+				line-height: 1;
+				transform: translateY(-1px);
 			}
 			.skill {
-				padding-left: 16px;
-				margin-top: 6px;
+				margin-top: 9px;
+				padding-left: 23px;
 			}
-			.skill .name {
-				font-weight: 500;
+			.skill .head {
+				display: flex;
+				align-items: center;
+			}
+			.skill .head .dot {
+				margin-right: 16px;
+			}
+			.skill .head .name {
+				margin-left: 2px;
+			}
+			.skill .head .meta {
+				margin-left: 14px;
+				font-size: 15px;
 			}
 			.skill .desc {
-				padding-left: 34px;
+				padding-left: 40px;
 				color: var(--dim);
 				white-space: nowrap;
 				overflow: hidden;
@@ -170,37 +188,33 @@
 			.skill.open .desc {
 				white-space: normal;
 			}
-			.skill.off {
+			.skill.off .head .dot,
+			.skill.off .name,
+			.skill.off .desc {
 				opacity: 0.5;
 			}
 			.details {
-				padding-left: 34px;
-				margin-top: 8px;
-			}
-			.details .row {
-				align-items: baseline;
-				gap: 8px;
+				padding-left: 40px;
+				margin-top: 10px;
+				font-size: 15px;
 			}
 			.details .k {
-				width: 52px;
+				width: 64px;
 				flex-shrink: 0;
 				color: var(--dim);
-				font-size: 12px;
 			}
-			.details .v {
-				font-size: 12px;
-				white-space: nowrap;
-				overflow: hidden;
-				text-overflow: ellipsis;
+			.details .row {
+				gap: 0;
+			}
+			.mono {
+				font-family: 'SF Mono', ui-monospace, Menlo, monospace;
+				font-size: 14px;
 			}
 			.actions {
 				display: flex;
 				flex-wrap: wrap;
-				gap: 6px;
-				margin: 8px 0 4px 34px;
-			}
-			.dot {
-				font-size: 11px;
+				gap: 8px;
+				margin: 12px 0 4px 40px;
 			}
 			.warn {
 				color: var(--warning);
@@ -209,47 +223,78 @@
 				color: var(--error);
 				font-weight: 700;
 			}
-			.ok {
-				color: var(--success);
-			}
 			.fold {
-				padding-left: 16px;
-				margin-top: 6px;
+				margin-top: 9px;
+				padding-left: 31px;
 			}
 			.fold .tags {
-				padding-left: 16px;
+				padding-left: 18px;
+				font-size: 15px;
 			}
 			.fold .skill {
-				padding-left: 16px;
+				padding-left: 18px;
+			}
+			.fold > .row {
+				gap: 0;
+			}
+			.fold > .row .tri {
+				margin-right: 1px;
+			}
+			.note {
+				margin-top: 6px;
+				padding-left: 21px;
+				color: var(--dim);
 			}
 		</style>
-		<script>
-			if (location.hash === '#dark')
-				document.documentElement.classList.add('dark');
-		</script>
 	</head>
 	<body>
 		<div class="pane">
 			<div class="titlebar">
-				<span>Loadout</span><span class="x">×</span>
+				<span>Loadout</span>
+				<span class="icons">
+					<svg
+						width="16"
+						height="16"
+						viewBox="0 0 16 16"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.5"
+						stroke-linecap="round"
+					>
+						<path
+							d="M9.5 2.5h4v4M13.5 2.5l-5 5M6.5 13.5h-4v-4M2.5 13.5l5-5"
+						/>
+					</svg>
+					<svg
+						width="16"
+						height="16"
+						viewBox="0 0 16 16"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.6"
+						stroke-linecap="round"
+					>
+						<path d="M2.5 2.5l11 11M13.5 2.5l-11 11" />
+					</svg>
+				</span>
 			</div>
 			<div class="body">
 				<div class="row between">
-					<span class="foot"
+					<span class="dim small"
 						>17 skills · 1 off · ≈ 1.9k tokens each session · read
 						9:41 AM</span
 					>
-					<span class="btn dim">Refresh</span>
+					<span class="btn quiet">Refresh</span>
 				</div>
-				<div class="row" style="margin-top: 4px">
-					<span class="foot warn"
+				<div class="row" style="margin-top: 8px">
+					<span class="warn small"
 						>⬆ ship-it 1.4.0 is out (you have 1.3.2)</span
 					>
 					<span class="btn">Update</span>
 				</div>
 
 				<div class="chips">
-					<span class="btn primary">All 17</span>
+					<span class="btn chosen">All 17</span>
 					<span class="btn">Local 4</span>
 					<span class="btn">Plugins 5</span>
 					<span class="btn">Project 3</span>
@@ -258,20 +303,32 @@
 					<span class="btn">Issues 1</span>
 				</div>
 
+				<div class="search">
+					<span class="field">Search</span>
+					<span class="btn">Clear</span>
+				</div>
+
 				<!-- Local -->
-				<div class="heading">
-					<div class="row">
-						<span class="dot" style="color: var(--local)">●</span>
-						<span class="label">▾ LOCAL</span>
-						<span class="foot">~/.claude/skills</span>
-					</div>
-					<span class="foot">4 · 1 off</span>
+				<div class="band">
+					<span class="left">
+						<span
+							class="dot"
+							style="background: var(--local)"
+						></span>
+						<span class="tri">▼</span>LOCAL
+						<span class="path dim">~/.claude/skills</span>
+					</span>
+					<span class="dim">4 · 1 off</span>
 				</div>
 				<div class="skill">
-					<div class="row">
-						<span class="dot" style="color: var(--local)">●</span>
-						<span class="name">▸ commit-message</span>
-						<span class="cap foot">12× · 2h ago</span>
+					<div class="head">
+						<span
+							class="dot"
+							style="background: var(--local)"
+						></span>
+						<span class="tri">▶</span
+						><span class="name">commit-message</span>
+						<span class="meta dim">12× · 2h ago</span>
 					</div>
 					<div class="desc">
 						Write a short, imperative commit message from the staged
@@ -279,10 +336,14 @@
 					</div>
 				</div>
 				<div class="skill open">
-					<div class="row">
-						<span class="dot" style="color: var(--local)">●</span>
-						<span class="name">▾ release-notes</span>
-						<span class="cap foot">3× · yesterday</span>
+					<div class="head">
+						<span
+							class="dot"
+							style="background: var(--local)"
+						></span>
+						<span class="tri">▼</span
+						><span class="name">release-notes</span>
+						<span class="meta dim">3× · yesterday</span>
 					</div>
 					<div class="desc">
 						Draft release notes from the merged pull requests since
@@ -291,17 +352,17 @@
 					<div class="details">
 						<div class="row">
 							<span class="k">File</span
-							><span class="v mono"
+							><span class="mono"
 								>~/.claude/skills/release-notes/SKILL.md</span
 							>
 						</div>
 						<div class="row">
 							<span class="k">Cost</span
-							><span class="v">≈ 38 tokens every session</span>
+							><span>≈ 38 tokens every session</span>
 						</div>
 						<div class="row">
 							<span class="k">Source</span
-							><span class="v"
+							><span
 								>npx skills · example-org/skills · Oct 29,
 								2026</span
 							>
@@ -316,47 +377,63 @@
 					</div>
 				</div>
 				<div class="skill">
-					<div class="row">
-						<span class="dot" style="color: var(--local)">●</span>
-						<span class="name">▸ api-docs</span>
-						<span class="cap warn">⚠ No description</span>
+					<div class="head">
+						<span
+							class="dot"
+							style="background: var(--local)"
+						></span>
+						<span class="tri">▶</span
+						><span class="name">api-docs</span>
+						<span class="meta warn">⚠ No description</span>
 					</div>
 				</div>
 				<div class="skill off">
-					<div class="row">
-						<span class="dot" style="color: var(--local)">●</span>
-						<span class="name">▸ old-linter</span>
-						<span class="cap err">OFF</span>
+					<div class="head">
+						<span
+							class="dot"
+							style="background: var(--local)"
+						></span>
+						<span class="tri">▶</span
+						><span class="name">old-linter</span>
+						<span class="meta err">OFF</span>
 					</div>
 					<div class="desc">
-						Run the legacy lint rules before the new config landed.
+						Run the legacy lint rules from before the new config
+						landed.
 					</div>
 				</div>
 
 				<!-- Plugins -->
-				<div class="heading">
-					<div class="row">
-						<span class="dot" style="color: var(--plugin)">●</span>
-						<span class="label">▾ PLUGINS</span>
-						<span class="foot">enabled</span>
-					</div>
-					<span class="foot">2 · 5 skills</span>
+				<div class="band">
+					<span class="left">
+						<span
+							class="dot"
+							style="background: var(--plugin)"
+						></span>
+						<span class="tri">▼</span>PLUGINS
+						<span class="path dim">enabled</span>
+					</span>
+					<span class="dim">2 · 5 skills</span>
 				</div>
 				<div class="fold">
 					<div class="row">
-						<span>▾ ship-it (2 skills · 1 command)</span>
-						<span class="cap warn">⬆ 1.4.0 available</span>
+						<span class="tri">▼</span>ship-it (2 skills · 1 command)
+						<span class="warn small" style="margin-left: 10px"
+							>⬆ 1.4.0 available</span
+						>
 					</div>
-					<div class="tags foot">
+					<div class="tags dim">
 						v1.3.2 · by Example Tools · ≈ 210 tokens each session
 					</div>
 					<div class="skill">
-						<div class="row">
-							<span class="dot" style="color: var(--plugin)"
-								>●</span
-							>
-							<span class="name">▸ deploy</span>
-							<span class="cap foot">5× · 3d ago</span>
+						<div class="head">
+							<span
+								class="dot"
+								style="background: var(--plugin)"
+							></span>
+							<span class="tri">▶</span
+							><span class="name">deploy</span>
+							<span class="meta dim">5× · 3d ago</span>
 						</div>
 						<div class="desc">
 							Build, tag and deploy the current branch to staging
@@ -364,11 +441,13 @@
 						</div>
 					</div>
 					<div class="skill">
-						<div class="row">
-							<span class="dot" style="color: var(--plugin)"
-								>●</span
-							>
-							<span class="name">▸ rollback</span>
+						<div class="head">
+							<span
+								class="dot"
+								style="background: var(--plugin)"
+							></span>
+							<span class="tri">▶</span
+							><span class="name">rollback</span>
 						</div>
 						<div class="desc">
 							Roll the last deploy back and post what changed.
@@ -377,24 +456,31 @@
 				</div>
 				<div class="fold">
 					<div class="row">
-						<span>▸ writing-tools (3 skills)</span>
+						<span class="tri">▶</span>writing-tools (3 skills)
 					</div>
 				</div>
 
 				<!-- Project -->
-				<div class="heading">
-					<div class="row">
-						<span class="dot" style="color: var(--project)">●</span>
-						<span class="label">▾ PROJECT</span>
-						<span class="foot">.claude/skills</span>
-					</div>
-					<span class="foot">3</span>
+				<div class="band">
+					<span class="left">
+						<span
+							class="dot"
+							style="background: var(--project)"
+						></span>
+						<span class="tri">▼</span>PROJECT
+						<span class="path dim">.claude/skills</span>
+					</span>
+					<span class="dim">3</span>
 				</div>
 				<div class="skill">
-					<div class="row">
-						<span class="dot" style="color: var(--project)">●</span>
-						<span class="name">▸ run-migrations</span>
-						<span class="cap foot">8× · 1h ago</span>
+					<div class="head">
+						<span
+							class="dot"
+							style="background: var(--project)"
+						></span>
+						<span class="tri">▶</span
+						><span class="name">run-migrations</span>
+						<span class="meta dim">8× · 1h ago</span>
 					</div>
 					<div class="desc">
 						Run pending database migrations and check the schema
@@ -402,18 +488,26 @@
 					</div>
 				</div>
 				<div class="skill">
-					<div class="row">
-						<span class="dot" style="color: var(--project)">●</span>
-						<span class="name">▸ seed-data</span>
+					<div class="head">
+						<span
+							class="dot"
+							style="background: var(--project)"
+						></span>
+						<span class="tri">▶</span
+						><span class="name">seed-data</span>
 					</div>
 					<div class="desc">
 						Fill the local database with the fixtures in tests/seed.
 					</div>
 				</div>
 				<div class="skill">
-					<div class="row">
-						<span class="dot" style="color: var(--project)">●</span>
-						<span class="name">▸ component-story</span>
+					<div class="head">
+						<span
+							class="dot"
+							style="background: var(--project)"
+						></span>
+						<span class="tri">▶</span
+						><span class="name">component-story</span>
 					</div>
 					<div class="desc">
 						Write a Storybook story for a component, with its props
@@ -422,20 +516,25 @@
 				</div>
 
 				<!-- claude.ai account -->
-				<div class="heading">
-					<div class="row">
-						<span class="dot" style="color: var(--synced)">●</span>
-						<span class="label">▾ CLAUDE.AI ACCOUNT</span>
-						<span class="foot">enabled only · synced Nov 7</span>
-					</div>
-					<span class="foot">5</span>
+				<div class="band">
+					<span class="left">
+						<span
+							class="dot"
+							style="background: var(--synced)"
+						></span>
+						<span class="tri">▼</span>CLAUDE.AI ACCOUNT
+						<span class="path dim"
+							>enabled only · synced Nov 7</span
+						>
+					</span>
+					<span class="dim">5</span>
 				</div>
 				<div class="fold">
-					<div class="row"><span>▸ Yours (1)</span></div>
+					<div class="row"><span class="tri">▶</span>Yours (1)</div>
 				</div>
 				<div class="fold">
 					<div class="row">
-						<span>▸ Anthropic document skills (4)</span>
+						<span class="tri">▶</span>Anthropic document skills (4)
 					</div>
 				</div>
 			</div>

@@ -25,10 +25,7 @@
 </p>
 
 <p align="center">
-	<picture>
-		<source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png">
-		<img alt="The Loadout pane with example skills: filter chips, then Local, Plugins, Project and claude.ai account sections. One skill is expanded to show its file, cost and source with Insert, VS Code, Finder, Turn off and Uninstall buttons; another is flagged for a missing description, and one is off." src="docs/screenshot-light.png" width="480">
-	</picture>
+	<img alt="The Loadout pane in the Claude desktop app with example skills: filter chips and a search field, then Local, Plugins, Project and claude.ai account sections. One skill is expanded to show its file, cost and source with Insert, VS Code, Finder, Turn off and Uninstall buttons; another is flagged for a missing description, and one is off." src="docs/screenshot-dark.png" width="480">
 </p>
 
 Your own skills, the project's, every enabled plugin and the skills on your claude.ai account, side by side. For each one you see what it does, where it lives and whether it's turned off, and one click puts its command in the prompt box.
