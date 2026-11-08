@@ -1894,7 +1894,12 @@ export const register: Register = (on) => {
 
 	on('command.run', { command: 'loadout' }, async ($) => {
 		await rescan($);
-		await $.ui.open({ id: PANE, title: TITLE });
+		// Focus hands the pane the keyboard; without it the keys stay in the
+		// prompt and nothing in the pane answers until ctrl+x tab or a click.
+		const opened = await $.ui.open({ id: PANE, title: TITLE, focus: true });
+		if (!opened.isPlaced) {
+			return { text: `Loadout could not be shown: ${opened.reason}` };
+		}
 
 		return { text: 'Loadout opened.' };
 	});
