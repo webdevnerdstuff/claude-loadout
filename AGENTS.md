@@ -17,6 +17,7 @@ The mod API is early access. Its declarations are the authority: Claude Code lay
 | `hooks/register.tsx` | The hooks module: the scan, `session.start` (registers `/loadout`, loads usage), `command.run`, `skill.prompt` (counts runs) and `ui.render` on the `Pane` |
 | `hooks/frontmatter.ts` | A small reader for a `SKILL.md`'s top-level frontmatter: plain, quoted, folded (`>`) and literal (`\|`) values. Pure, no `$` |
 | `types/index.d.ts` | The plugin's contract: its `$.state` keys and the shapes they hold |
+| `docs/demo/` | `pane.html`, a hand-drawn copy of the pane with made-up skills, and `render.sh`, which renders it to the README's `docs/screenshot-light.png` and `-dark.png`. Update it when the pane's look changes |
 | `tests/pane.test.tsx` | `claude plugin test` suite: a fake machine answered by hooks, the pane mounted on it |
 
 ## Commands
