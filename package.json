@@ -1,0 +1,18 @@
+{
+	"name": "claude-loadout",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Development scripts for the loadout Claude Code plugin.",
+	"license": "MIT",
+	"author": "WebDevNerdStuff & Bunnies... lots and lots of bunnies! <webdevnerdstuff@gmail.com> (https://webdevnerdstuff.com)",
+	"repository": "github:webdevnerdstuff/claude-loadout",
+	"scripts": {
+		"test": "claude plugin test .",
+		"validate": "claude plugin validate .",
+		"format": "prettier --write .",
+		"check": "pnpm validate && pnpm test"
+	},
+	"devDependencies": {
+		"prettier": "3.3.3"
+	}
+}

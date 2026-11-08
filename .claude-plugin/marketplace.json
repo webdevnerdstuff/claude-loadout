@@ -1,0 +1,15 @@
+{
+	"name": "claude-loadout",
+	"description": "loadout: see every skill and plugin Claude Code has equipped, in one pane.",
+	"owner": {
+		"name": "WebDevNerdStuff & Bunnies... lots and lots of bunnies!",
+		"email": "webdevnerdstuff@gmail.com",
+		"url": "https://webdevnerdstuff.com"
+	},
+	"plugins": [
+		{
+			"name": "loadout",
+			"source": "./"
+		}
+	]
+}

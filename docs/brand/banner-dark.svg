@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-labelledby="title desc">
+	<title id="title">loadout</title>
+	<desc id="desc">A pane of filter chips and skill rows, each with a colored source dot, one tagged off and one flagged, beside the word loadout: every skill and plugin Claude Code has equipped.</desc>
+	<rect width="1200" height="300" rx="24" fill="#0b0b0f"/>
+
+	<!-- The mark: the loadout pane. -->
+	<g transform="translate(84 42)">
+		<rect x="0" y="0" width="248" height="216" rx="18" fill="#000000" stroke="#2a2a35" stroke-width="3"/>
+		<line x1="0" y1="40" x2="248" y2="40" stroke="#2a2a35" stroke-width="3"/>
+		<!-- Filter chips: All picked. -->
+		<rect x="16" y="12" width="38" height="16" rx="8" fill="#ff1190"/>
+		<rect x="62" y="12" width="44" height="16" rx="8" fill="none" stroke="#2a2a35" stroke-width="2.5"/>
+		<rect x="114" y="12" width="36" height="16" rx="8" fill="none" stroke="#2a2a35" stroke-width="2.5"/>
+		<rect x="158" y="12" width="48" height="16" rx="8" fill="none" stroke="#2a2a35" stroke-width="2.5"/>
+		<!-- Skill rows: a source dot, a name, and a tag where one applies. -->
+		<circle cx="28" cy="66" r="6" fill="#2492ff"/>
+		<rect x="44" y="61" width="92" height="10" rx="5" fill="#2a2a35"/>
+		<circle cx="28" cy="100" r="6" fill="#2492ff"/>
+		<rect x="44" y="95" width="64" height="10" rx="5" fill="#2a2a35"/>
+		<rect x="118" y="92" width="34" height="16" rx="8" fill="#ff119026" stroke="#ff1190" stroke-width="2"/>
+		<rect x="127" y="98" width="16" height="4" rx="2" fill="#ff1190"/>
+		<circle cx="28" cy="134" r="6" fill="#0aff04"/>
+		<rect x="44" y="129" width="80" height="10" rx="5" fill="#2a2a35"/>
+		<circle cx="28" cy="168" r="6" fill="#a5a8ff"/>
+		<rect x="44" y="163" width="70" height="10" rx="5" fill="#2a2a35"/>
+		<path d="M 134 160 L 143 175 L 125 175 Z" fill="#ffd400"/>
+		<circle cx="28" cy="202" r="6" fill="#ffb46a"/>
+		<rect x="44" y="197" width="86" height="10" rx="5" fill="#2a2a35"/>
+	</g>
+
+	<!-- Wordmark -->
+	<text x="388" y="162" font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace" font-size="88" font-weight="700" letter-spacing="-2">
+		<tspan fill="#ffffff">load</tspan><tspan fill="#2492ff">out</tspan><tspan fill="#ff1190">.</tspan>
+	</text>
+	<text x="392" y="214" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Inter, sans-serif" font-size="30" fill="#9a9aa6">
+		Every skill and plugin Claude Code has equipped
+	</text>
+</svg>
