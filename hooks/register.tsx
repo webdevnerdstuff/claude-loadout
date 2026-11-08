@@ -31,6 +31,7 @@ type InstalledPlugin = {
 
 type PluginManifest = {
 	name?: unknown;
+	author?: unknown;
 	description?: unknown;
 	version?: unknown;
 	skills?: unknown;
@@ -252,6 +253,17 @@ const scanDir = async (
 	return found.sort((a, b) => a.name.localeCompare(b.name));
 };
 
+// A manifest's author: a plain string, or an object with a `name`.
+const authorOf = (author: unknown): string | undefined => {
+	if (typeof author === 'string') return author || undefined;
+	if (author && typeof author === 'object' && 'name' in author) {
+		const name = (author as { name?: unknown }).name;
+		return typeof name === 'string' && name ? name : undefined;
+	}
+
+	return undefined;
+};
+
 const readManifest = async (
 	$: EngineInterface,
 	root: string,
@@ -398,6 +410,7 @@ const scanPlugins = async (
 				typeof manifest.version === 'string'
 					? manifest.version
 					: one.version,
+			author: authorOf(manifest.author),
 			description:
 				typeof manifest.description === 'string'
 					? manifest.description
@@ -800,7 +813,7 @@ const TITLE = 'Loadout';
 const USAGE_KEY = 'usage';
 
 const scan = atom({ plugin: 'loadout', key: 'scan' } as const, null, {
-	shape: 'scan-11',
+	shape: 'scan-12',
 });
 const filter = atom({ plugin: 'loadout', key: 'filter' } as const, 'local', {
 	shape: 'filter-1',
@@ -1997,17 +2010,19 @@ export const register: Register = (on) => {
 						{isForced && (
 							<Text>{`▾ ${label} (${tally ?? skills.length})`}</Text>
 						)}
-						{tags && (
-							<Text dimColor size="caption">
-								{tags}
-							</Text>
-						)}
 						{!isOpen && issues > 0 && (
 							<Text color="warning" size="caption">
 								⚠ {issues}
 							</Text>
 						)}
 					</Box>
+					{isOpen && tags && (
+						<Box paddingLeft={2}>
+							<Text dimColor size="footnote">
+								{tags}
+							</Text>
+						</Box>
+					)}
 					{isOpen && skills.map(row)}
 				</Box>
 			);
@@ -2016,6 +2031,7 @@ export const register: Register = (on) => {
 		const pluginTags = (plugin: PluginInfo): string =>
 			[
 				plugin.version ? `v${plugin.version}` : '',
+				plugin.author ? `by ${plugin.author}` : '',
 				plugin.origin === 'dev folder' ? 'dev folder' : '',
 			]
 				.filter(Boolean)
@@ -2037,9 +2053,7 @@ export const register: Register = (on) => {
 			>
 				<Text dimColor>{`  ${plugin.name}`}</Text>
 				<Text dimColor size="caption">
-					{['no skills or commands', pluginTags(plugin)]
-						.filter(Boolean)
-						.join(' · ')}
+					no skills or commands
 				</Text>
 			</Box>
 		);
