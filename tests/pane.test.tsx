@@ -1623,3 +1623,12 @@ test('on the desktop the field’s own button is Clear, with no second one', asy
 	).toBeUndefined();
 	await ui.unmount();
 });
+
+test('the search box says just Search, so it fits a narrow field', async ($, on) => {
+	engine(on);
+	const ui = await mount($, 'desktop');
+	expect(
+		(await ui.find({ type: 'Input', key: 'search' }))?.props.placeholder,
+	).toBe('Search');
+	await ui.unmount();
+});

@@ -2752,7 +2752,7 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 				    prompt empties on send, so it clears the search to match. */}
 				<Input
 					key="search"
-					placeholder="Search skills and plugins"
+					placeholder="Search"
 					value={searched}
 					// The desktop draws the field's own button with this label, so
 					// there it is the Clear button (Enter clears the search); the
