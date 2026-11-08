@@ -2,6 +2,8 @@ import type { On } from 'claude-code';
 import type { TestBody } from 'claude-code/testing';
 import { expect, test } from 'claude-code/testing';
 
+import { ringStep } from '../hooks/register';
+
 const PANE = {
 	plugin: 'loadout',
 	component: 'Pane',
@@ -1445,14 +1447,85 @@ test('/loadout says why when the pane could not be placed', async ($, on) => {
 	expect(text).toMatch(/no-surface/);
 });
 
-test('the focused pane starts its ring on the chosen filter, so Enter acts at once', async ($, on) => {
+test('the focused pane starts its ring on the first skill row, so Enter opens it', async ($, on) => {
 	engine(on);
 	const ui = await mount($, 'terminal');
 
 	const focused = (await ui.findAll({ type: 'Button' })).filter(
 		(button) => button.props.autoFocus === true,
 	);
-	// The All chip's value is `local`.
-	expect(focused.map((button) => button.key)).toEqual(['chip:local']);
+	const rows = (await ui.findAll({ type: 'Button' })).filter((button) =>
+		button.key?.startsWith('row:'),
+	);
+	expect(focused.map((button) => button.key)).toEqual([rows[0]?.key]);
 	await ui.unmount();
+});
+
+test('with no skill row drawn the ring starts on the chosen filter', async ($, on) => {
+	engine(on);
+	const ui = await mount($, 'terminal');
+	await ui.press({ key: 'chip:project' });
+
+	const focused = (await ui.findAll({ type: 'Button' })).filter(
+		(button) => button.props.autoFocus === true,
+	);
+	expect(focused.map((button) => button.key)).toEqual(['chip:project']);
+	await ui.unmount();
+});
+
+const arrow = (by: number) => ({ origin: { kind: 'person' as const }, by });
+const RING = ['Refresh', 'chip:local', 'row:a', 'row:b'];
+
+test('the arrows walk the ring a step at a time', () => {
+	expect(ringStep(arrow(1), RING, 'chip:local')).toBe('row:a');
+	expect(ringStep(arrow(-1), RING, 'row:a')).toBe('chip:local');
+	// Off the ring, or on nothing, the arrows land on its first stop.
+	expect(ringStep(arrow(1), RING, undefined)).toBe('Refresh');
+	expect(ringStep(arrow(1), RING, 'gone')).toBe('Refresh');
+});
+
+test('past either end, and for the wheel or page keys, the window scrolls', () => {
+	expect(ringStep(arrow(1), RING, 'row:b')).toBeUndefined();
+	expect(ringStep(arrow(-1), RING, 'Refresh')).toBeUndefined();
+	const wheel = { ...arrow(1), pointer: { row: 3, column: 4 } };
+	expect(ringStep(wheel, RING, 'row:a')).toBeUndefined();
+	expect(ringStep(arrow(12), RING, 'row:a')).toBeUndefined();
+	expect(
+		ringStep({ origin: { kind: 'plugin' }, by: 1 }, RING, 'row:a'),
+	).toBeUndefined();
+	expect(ringStep(arrow(1), [], undefined)).toBeUndefined();
+});
+
+test('in the terminal, a pane without the keyboard says how to get it back', async ($, on) => {
+	engine(on);
+	const ui = await mount($, 'terminal');
+	expect(
+		(await ui.find({ type: 'Text', text: /ctrl\+x tab/ }))?.text,
+	).toMatch(/\/loadout/);
+
+	await ui.redraw({ ...PANE.props, isFocused: true });
+	expect(
+		await ui.find({ type: 'Text', text: /ctrl\+x tab/ }),
+	).toBeUndefined();
+	await ui.unmount();
+});
+
+test('on the main screen /loadout names the setting that docks it beside the chat', async ($, on) => {
+	engine(on);
+	await $.session.start({
+		cwd: '/project',
+		surface: 'terminal',
+		isInteractive: true,
+	});
+	const main = await $.command.run({
+		command: 'loadout',
+		presentation: { isFullscreen: false, columns: 95 },
+	} as Parameters<typeof $.command.run>[0]);
+	expect(main.text).toMatch(/\/tui fullscreen/);
+
+	const full = await $.command.run({
+		command: 'loadout',
+		presentation: { isFullscreen: true, columns: 140 },
+	} as Parameters<typeof $.command.run>[0]);
+	expect(full.text).toBe('Loadout opened.');
 });
