@@ -74,7 +74,7 @@ These are refused at load, so `validate` catches them:
 ## Tests
 
 - The pane goes through the engine: `$.ui.mount({ plugin: 'loadout', surface, component: 'Pane', requestId: 'loadout', props })`, with every `$.fs`, `$.settings`, `$.env`, `$.store` and `$.prompt` call answered by `engine()` in `tests/pane.test.tsx` from a fake file table. Never point a test at a real home folder.
-- Find a Button by its `key` (`row:<id>`, `fold:<id>`, `chip:<filter>`, `insert:<id>`, and the fixes `create:`, `remove:`, `confirm-remove:`, `reveal:`, `ask:`), and a Text by its words. A command's id is `command:<plugin>:<name>`.
+- Find a Button by its `key` (`row:<id>`, `fold:<id>`, `chip:<filter>`, `search-clear`, `insert:<id>`, and the fixes `create:`, `remove:`, `confirm-remove:`, `reveal:`, `ask:`), and a Text by its words. Type into the search box with `ui.input({ key: 'search', text })`. A command's id is `command:<plugin>:<name>`.
 
 ## Style
 
