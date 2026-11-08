@@ -2652,6 +2652,10 @@ export const register: Register = (on) => {
 						.map(([value, label]) => (
 							<Button
 								key={`chip:${value}`}
+								// The ring starts on the chosen filter when the pane
+								// takes the keyboard: without it the ring sits on
+								// nothing, and Enter or the arrows do nothing until Tab.
+								autoFocus={chosen === value || undefined}
 								variant={
 									chosen === value ? 'primary' : 'secondary'
 								}

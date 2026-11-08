@@ -1444,3 +1444,15 @@ test('/loadout says why when the pane could not be placed', async ($, on) => {
 
 	expect(text).toMatch(/no-surface/);
 });
+
+test('the focused pane starts its ring on the chosen filter, so Enter acts at once', async ($, on) => {
+	engine(on);
+	const ui = await mount($, 'terminal');
+
+	const focused = (await ui.findAll({ type: 'Button' })).filter(
+		(button) => button.props.autoFocus === true,
+	);
+	// The All chip's value is `local`.
+	expect(focused.map((button) => button.key)).toEqual(['chip:local']);
+	await ui.unmount();
+});
