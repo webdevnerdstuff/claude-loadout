@@ -81,7 +81,7 @@ const FILES: Record<string, Node> = {
 	},
 	'/plugins/tools/.claude-plugin/plugin.json': {
 		kind: 'file',
-		text: '{"name":"tools","version":"1.2.0"}',
+		text: '{"name":"tools","version":"1.2.0","author":{"name":"Tool Maker"}}',
 	},
 	'/plugins/tools/skills': { kind: 'dir' },
 	'/plugins/tools/skills/plan': { kind: 'dir' },
@@ -326,6 +326,8 @@ test('All lists every source, flags problems and leaves disabled things out', as
 	expect(
 		(await ui.find({ type: 'Button', key: 'fold:group:mover' }))?.text,
 	).toBe('▸ mover (1 command)');
+	expect(await ui.find({ type: 'Text', text: /dev folder/ })).toBeUndefined();
+	await ui.press({ key: 'fold:group:mover' });
 	expect((await ui.find({ type: 'Text', text: /dev folder/ }))?.text).toBe(
 		'v0.1.0 · dev folder',
 	);
@@ -1063,5 +1065,16 @@ test("Uninstall plugin runs the desktop app's own claude first", async ($, on) =
 		'disabled@market',
 	]);
 	expect(state.runs.some((argv) => argv[0] === 'claude')).toBe(false);
+	await ui.unmount();
+});
+
+test('each plugin shows its author', async ($, on) => {
+	engine(on);
+	const ui = await mount($);
+	expect(await ui.find({ type: 'Text', text: /Tool Maker/ })).toBeUndefined();
+	await ui.press({ key: 'fold:group:tools' });
+	expect((await ui.find({ type: 'Text', text: /Tool Maker/ }))?.text).toBe(
+		'v1.2.0 · by Tool Maker',
+	);
 	await ui.unmount();
 });

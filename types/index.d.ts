@@ -75,6 +75,7 @@ export type PluginInfo = {
 	origin: 'marketplace' | 'dev folder';
 	path: string;
 	version?: string;
+	author?: string;
 	marketplace?: string;
 	description?: string;
 	skillCount: number;
