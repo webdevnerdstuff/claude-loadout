@@ -74,6 +74,9 @@ claude plugin uninstall loadout@claude-loadout
 ## Use
 
 1. Run `/loadout` in any session. The **Loadout** pane opens.
+
+   **In a terminal**, the pane docks beside the chat only in Claude Code's fullscreen renderer: run `/tui fullscreen` once to turn it on for every session. Without it, the pane opens above the prompt. If the keys go back to the prompt, press <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>Tab</kbd> (twice if a mod puts a bar above the prompt) or run `/loadout` again.
+
 2. Pick a chip to narrow the list, or stay on **All**.
 3. Click a skill to read its full description and see where its file lives.
 4. In an expanded skill, click **Insert** to start a prompt with it, or **VS Code ↗** to edit it.

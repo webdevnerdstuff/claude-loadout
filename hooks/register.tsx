@@ -1,5 +1,10 @@
 import { atom, read, update } from 'claude-code';
-import type { CommandInfo, EngineInterface, Register } from 'claude-code';
+import type {
+	CommandInfo,
+	EngineInterface,
+	Register,
+	RenderInput,
+} from 'claude-code';
 
 import type {
 	PluginInfo,
@@ -1878,8 +1883,986 @@ const ago = (when: number): string => {
 const usageOf = (all: SkillUsage, skill: SkillEntry) =>
 	all[skill.slash.slice(1)] ?? all[skill.name];
 
+// The keyboard in the pane. Tab walks its focus ring, but while the list is
+// taller than the pane (inline above the prompt, in a narrow terminal) the
+// engine scrolls on the arrows instead, so they walk the ring here too, and
+// the ring starts on a row Enter visibly opens.
+
+type Drawn = {
+	type?: unknown;
+	props?: Record<string, unknown>;
+	children?: unknown;
+};
+
+const RING_STOPS = new Set(['Button', 'Input', 'Select']);
+
+/** The elements a tree draws that the ring stops on, in document order. */
+function ringStops(node: unknown, into: Drawn[] = []): Drawn[] {
+	if (Array.isArray(node)) {
+		for (const child of node) ringStops(child, into);
+	} else if (typeof node === 'object' && node !== null) {
+		const drawn = node as Drawn;
+		if (
+			RING_STOPS.has(String(drawn.type)) &&
+			typeof drawn.props?.key === 'string'
+		) {
+			into.push(drawn);
+		}
+		ringStops(drawn.children, into);
+	}
+
+	return into;
+}
+
+/** The ring's first stop: the first skill row, else the chosen filter. */
+function ringStart(stops: readonly Drawn[]): string | undefined {
+	const keys = stops.map((stop) => String(stop.props?.key));
+	const chosen = stops.find(
+		(stop) =>
+			String(stop.props?.key).startsWith('chip:') &&
+			stop.props?.variant === 'primary',
+	);
+
+	return (
+		keys.find((key) => key.startsWith('row:')) ??
+		(chosen ? String(chosen.props?.key) : undefined)
+	);
+}
+
+/**
+ * The tree with `autoFocus` on the element keyed `key`: drawn elements are
+ * frozen, so the path down to it is copied.
+ */
+function withAutoFocus<T>(node: T, key: string): T {
+	if (Array.isArray(node)) {
+		const children = node.map((child) => withAutoFocus(child, key));
+
+		return (
+			children.some((child, i) => child !== node[i]) ? children : node
+		) as T;
+	}
+	if (typeof node !== 'object' || node === null) return node;
+	const drawn = node as Drawn;
+	if (RING_STOPS.has(String(drawn.type)) && drawn.props?.key === key) {
+		return { ...drawn, props: { ...drawn.props, autoFocus: true } } as T;
+	}
+	const children = withAutoFocus(drawn.children, key);
+
+	return (children === drawn.children ? node : { ...drawn, children }) as T;
+}
+
+type ScrollAsked = {
+	origin: { kind: string };
+	by: number;
+	pointer?: unknown;
+};
+
+/**
+ * Where an arrow moves the ring: the stop a step along, or undefined to let
+ * the window scroll (the wheel, a page key, a plugin's scroll, either end).
+ */
+export function ringStep(
+	asked: ScrollAsked,
+	stops: readonly string[],
+	at: string | undefined,
+): string | undefined {
+	const isArrow =
+		asked.origin.kind === 'person' &&
+		asked.pointer === undefined &&
+		Math.abs(asked.by) === 1;
+	if (!isArrow || stops.length === 0) return undefined;
+	const index = at === undefined ? -1 : stops.indexOf(at);
+	if (index < 0) return stops[0];
+
+	return stops[index + asked.by];
+}
+
+async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
+	const { Box, Text, Button } = $.ui.resolve(e);
+	const data = await read($, scan);
+	const expanded = await read($, open);
+	const picked = await read($, filter);
+	const used = await read($, usage);
+	const waiting = await read($, confirm);
+	const shownNotice = await read($, notice);
+	const available = await read($, updates);
+
+	if (!data) {
+		return (
+			<Box flexDirection="column" gap={1}>
+				<Text dimColor>Reading your skills…</Text>
+				<Button label="Refresh" onPress={() => void rescan($)} />
+			</Box>
+		);
+	}
+
+	const has = (skill: SkillEntry, code: SkillProblem['code']) =>
+		skill.problems.some((problem) => problem.code === code);
+
+	// A button with a label that shows while the pointer is over it: a
+	// hidden Box beside the button, revealed by its keyed wrapper's hover, sized
+	// to its text so it never wraps to the button's width. Buttons have no
+	// tooltip of their own.
+	// What an expanded row offers: Insert for a healthy skill; for a flagged
+	// one, the fixes its problems call for instead.
+	const actions = (skill: SkillEntry) => {
+		const folder = skill.folder ?? '';
+		const duplicate = skill.problems.find(
+			(problem) => problem.code === 'duplicate',
+		);
+		const pluginInfo =
+			skill.source === 'plugin'
+				? data.plugins.find((plugin) => plugin.name === skill.group)
+				: undefined;
+		// Only Local and Project skills are yours to open and edit: plugin files
+		// are a cache or a repo of their own, account skills a synced copy.
+		const isEditable =
+			skill.source === 'user' || skill.source === 'project';
+		// Open: the SKILL.md in VS Code, or the default text editor.
+		const edit = isEditable && skill.file && (
+			<Button
+				key={`edit:${skill.id}`}
+				label="VS Code ↗"
+				onPress={() => void openFile($, skill.file ?? '')}
+			/>
+		);
+		const finder = isEditable && skill.folder && (
+			<Button
+				key={`reveal:${skill.id}`}
+				label="Finder ↗"
+				onPress={() => void reveal($, skill.folder ?? '')}
+			/>
+		);
+		const account = skill.source === 'synced' && skill.isAccountOwn && (
+			<Button
+				key={`account:${skill.id}`}
+				label="Skills ↗"
+				onPress={() => void openAccountSkills($)}
+			/>
+		);
+		const pluginPage = pluginInfo && (
+			<Button
+				key={`plugin-page:${skill.id}`}
+				label="Plugins ↗"
+				onPress={() => void openPluginPage($, pluginInfo)}
+			/>
+		);
+		// Remove is on every Local skill, and picks the way that undoes how it got
+		// there: npx skills, a shortcut, or a real folder. A Project skill is the
+		// repo's: it is removed through git, not here.
+		const canDelete =
+			data.isMac && Boolean(skill.folder) && skill.source === 'user';
+		const deleteKey = `delete:${skill.id}`;
+		const remove =
+			canDelete &&
+			(waiting === deleteKey ? (
+				[
+					<Button
+						key={`confirm-delete:${skill.id}`}
+						variant="primary"
+						label={
+							skill.npxName
+								? 'Confirm: uninstall'
+								: skill.linkTarget
+									? 'Confirm: delete shortcut'
+									: 'Confirm: move to Trash'
+						}
+						onPress={(press) =>
+							skill.npxName
+								? void uninstallNpxSkill(
+										$,
+										skill,
+										skill.npxName,
+									)
+								: void deleteSkill(
+										$,
+										skill.folder ?? '',
+										overrideKeysOf(skill),
+									)
+						}
+					/>,
+					<Button
+						key={`cancel:${skill.id}`}
+						label="Cancel"
+						onPress={() => void update($, confirm, () => '')}
+					/>,
+				]
+			) : (
+				<Button
+					key={deleteKey}
+					label={
+						skill.npxName
+							? 'Uninstall'
+							: skill.linkTarget
+								? 'Delete shortcut'
+								: 'Trash'
+					}
+					onPress={(press) =>
+						void confirmThen($, {
+							key: deleteKey,
+							...deleteQuestion(skill),
+							run: () =>
+								skill.npxName
+									? uninstallNpxSkill($, skill, skill.npxName)
+									: deleteSkill(
+											$,
+											skill.folder ?? '',
+											overrideKeysOf(skill),
+										),
+						})
+					}
+				/>
+			));
+		const turnOff = !skill.isOff &&
+			skill.kind !== 'command' &&
+			skill.file && (
+				<Button
+					key={`turn-off:${skill.id}`}
+					label="Turn off"
+					onPress={() => void turnSkillOff($, skill)}
+				/>
+			);
+		const turnOn = skill.isOff && skill.kind !== 'command' && (
+			<Button
+				key={`turn-on:${skill.id}`}
+				variant="primary"
+				label="Turn on"
+				onPress={() => void turnSkillOn($, skill)}
+			/>
+		);
+		if (warningsOf(skill).length === 0) {
+			// Insert, Open and Finder lead; the actions that change things follow.
+			return [
+				// A skill that is off cannot run, so it has nothing to insert.
+				!skill.isOff && (
+					<Button
+						key={`insert:${skill.id}`}
+						label="Insert"
+						onPress={(press) =>
+							void insertCommand($, skill.slash, press.surface)
+						}
+					/>
+				),
+				edit,
+				finder,
+				account,
+				pluginPage,
+				turnOn,
+				turnOff,
+				remove,
+			]
+				.flat()
+				.filter(Boolean);
+		}
+
+		const folderName = folder.slice(folder.lastIndexOf('/') + 1);
+		const writes = (fix: () => Promise<void>) => () => void fix();
+		// Fixes write files, so only on Local skills: a Project skill's files are
+		// the repo's, fixed by hand.
+		const isLocal = skill.source === 'user';
+
+		// A flagged skill leads with what fixes it; Open and Finder follow.
+		return [
+			isLocal && has(skill, 'no-skill-md') && folder && (
+				<Button
+					key={`create:${skill.id}`}
+					variant="primary"
+					label="Create SKILL.md"
+					onPress={writes(() =>
+						createSkillFile($, folder, skill.name),
+					)}
+				/>
+			),
+			isLocal && has(skill, 'no-frontmatter') && skill.file && (
+				<Button
+					key={`frontmatter:${skill.id}`}
+					variant="primary"
+					label="Add frontmatter"
+					onPress={writes(() =>
+						addFrontmatter($, skill.file ?? '', folderName),
+					)}
+				/>
+			),
+			isLocal && has(skill, 'lowercase-file') && skill.lowercaseFile && (
+				<Button
+					key={`rename:${skill.id}`}
+					variant="primary"
+					label="Rename to SKILL.md"
+					onPress={writes(() =>
+						renameSkillFile($, folder, skill.lowercaseFile ?? ''),
+					)}
+				/>
+			),
+			isLocal &&
+				has(skill, 'broken-link') &&
+				folder &&
+				(waiting === skill.id ? (
+					[
+						<Button
+							key={`confirm-remove:${skill.id}`}
+							variant="primary"
+							label="Confirm remove"
+							onPress={() => void removeLink($, folder)}
+						/>,
+						<Button
+							key={`cancel:${skill.id}`}
+							label="Cancel"
+							onPress={() => void update($, confirm, () => '')}
+						/>,
+					]
+				) : (
+					<Button
+						key={`remove:${skill.id}`}
+						label="Remove link"
+						onPress={() =>
+							void confirmThen($, {
+								key: skill.id,
+								question: `Remove the broken shortcut ${skill.name} (nothing else is touched)?`,
+								ok: 'Remove link',
+								run: () => removeLink($, folder),
+							})
+						}
+					/>
+				)),
+			skill.offPlugin &&
+				(waiting === `uninstall:${skill.id}` ? (
+					[
+						<Button
+							key={`confirm-uninstall:${skill.id}`}
+							variant="primary"
+							label={
+								skill.offPlugin.isLastFromMarketplace
+									? `Confirm: uninstall ${skill.offPlugin.name} and its marketplace`
+									: `Confirm: uninstall ${skill.offPlugin.name}`
+							}
+							onPress={(press) =>
+								void uninstallPlugin(
+									$,
+									skill.offPlugin as OffPlugin,
+									press.surface,
+								)
+							}
+						/>,
+						<Button
+							key={`cancel:${skill.id}`}
+							label="Cancel"
+							onPress={() => void update($, confirm, () => '')}
+						/>,
+					]
+				) : (
+					<Button
+						key={`uninstall:${skill.id}`}
+						label={`Uninstall ${skill.offPlugin.name} plugin`}
+						onPress={(press) => {
+							const plugin = skill.offPlugin as OffPlugin;
+							void confirmThen($, {
+								key: `uninstall:${skill.id}`,
+								question: plugin.isLastFromMarketplace
+									? `Uninstall the ${plugin.name} plugin and its ${plugin.marketplace} marketplace (nothing else uses it)?`
+									: `Uninstall the ${plugin.name} plugin?`,
+								ok: 'Uninstall',
+								run: () =>
+									uninstallPlugin($, plugin, press.surface),
+							});
+						}}
+					/>
+				)),
+			duplicate && (
+				<Button
+					key={`ask:${skill.id}`}
+					label="Ask Claude"
+					onPress={() => void askClaude($, skill, duplicate)}
+				/>
+			),
+			edit,
+			finder,
+			account,
+			pluginPage,
+			!has(skill, 'broken-link') && turnOn,
+			!has(skill, 'broken-link') && turnOff,
+			!has(skill, 'broken-link') && remove,
+		]
+			.flat()
+			.filter(Boolean);
+	};
+
+	// One labelled line of an expanded skill: a fixed label column, then the
+	// value, so file, cost and source read apart.
+	const detail = (label: string, value: string, isPath?: boolean) => (
+		<Box key={label} flexDirection="row" gap={1}>
+			<Box width={7} flexShrink={0}>
+				<Text dimColor size="footnote">
+					{label}
+				</Text>
+			</Box>
+			<Text size="footnote" mono={isPath} wrap="truncate-end">
+				{value}
+			</Text>
+		</Box>
+	);
+
+	const details = (skill: SkillEntry) => {
+		const isCosted = skill.tokens !== undefined;
+		const cost =
+			skill.tokens === 0
+				? "None: not in Claude's context"
+				: skill.isOff
+					? `≈ ${skill.tokens} tokens, none while off`
+					: `≈ ${skill.tokens} tokens every session`;
+
+		return (
+			<Box flexDirection="column" marginTop={1}>
+				{skill.path && detail('File', skill.path, true)}
+				{isCosted && detail('Cost', cost)}
+				{skill.origin && detail('Source', skill.origin)}
+			</Box>
+		);
+	};
+
+	const row = (skill: SkillEntry) => {
+		const isOpen = expanded.includes(skill.id);
+		const use = usageOf(used, skill);
+
+		return (
+			<Box
+				key={skill.id}
+				flexDirection="column"
+				paddingLeft={2}
+				marginTop="xs"
+			>
+				<Box flexDirection="row" alignItems="center" gap={1}>
+					<Text
+						color={SOURCE_COLOR[skill.source]}
+						dimColor={skill.isOff}
+					>
+						●
+					</Text>
+					<Button
+						key={`row:${skill.id}`}
+						plain
+						dimColor={skill.isOff}
+						onPress={() => void toggle($, skill.id)}
+					>
+						{`${isOpen ? '▾' : '▸'} ${skill.name}`}
+					</Button>
+					{skill.isOff && (
+						<Text color="error" bold size="caption">
+							OFF
+						</Text>
+					)}
+					{warningsOf(skill).length > 0 && (
+						<Text color="warning" size="caption">
+							⚠ {warningsOf(skill)[0]?.text}
+						</Text>
+					)}
+					{warningsOf(skill).length === 0 &&
+						hintsOf(skill).length > 0 && (
+							<Text dimColor size="caption">
+								ⓘ {hintsOf(skill)[0]?.text}
+							</Text>
+						)}
+					{use && (
+						<Text dimColor size="caption">
+							{use.count}× · {ago(use.last)}
+						</Text>
+					)}
+				</Box>
+				<Box paddingLeft={4} flexDirection="column">
+					<Text dimColor wrap={isOpen ? 'wrap' : 'truncate-end'}>
+						{isOpen
+							? skill.description
+							: oneLine(skill.description)}
+					</Text>
+					{isOpen &&
+						skill.problems.map((problem) =>
+							problem.isHint ? (
+								<Text dimColor size="footnote">
+									ⓘ {problem.text}
+								</Text>
+							) : (
+								<Text color="warning" size="footnote">
+									⚠ {problem.text}
+								</Text>
+							),
+						)}
+					{isOpen && details(skill)}
+					{isOpen && (
+						<Box
+							flexDirection="row"
+							flexWrap="wrap"
+							gap={1}
+							marginTop={skill.kind === 'command' ? 'xs' : 1}
+						>
+							{actions(skill)}
+						</Box>
+					)}
+				</Box>
+			</Box>
+		);
+	};
+
+	// A section's open state lives in the same list as the rows', under
+	// `closed:<section>`: sections start open.
+	const isClosed = (section: string) =>
+		expanded.includes(`closed:${section}`);
+
+	const heading = (
+		label: string,
+		where: string,
+		color: string,
+		count: number | string,
+		off: number,
+		section: string,
+	) => (
+		<Box
+			flexDirection="row"
+			justifyContent="space-between"
+			alignItems="center"
+			marginTop="md"
+			paddingX={1}
+			backgroundColor="#80808026"
+		>
+			<Box flexDirection="row" gap={1} alignItems="center">
+				<Text color={color}>●</Text>
+				<Button
+					key={`section:${section}`}
+					plain
+					onPress={() => void toggle($, `closed:${section}`)}
+				>
+					{`${isClosed(section) ? '▸' : '▾'} ${label.toUpperCase()}`}
+				</Button>
+				{where && (
+					<Text dimColor size="footnote">
+						{where}
+					</Text>
+				)}
+			</Box>
+			<Text dimColor size="footnote">
+				{off ? `${count} · ${off} off` : `${count}`}
+			</Text>
+		</Box>
+	);
+
+	const fold = (
+		id: string,
+		label: string,
+		skills: SkillEntry[],
+		isForced: boolean,
+		tags?: string,
+		tally?: string,
+		badge?: string,
+	) => {
+		const isOpen = isForced || expanded.includes(id);
+		const issues = skills.filter(
+			(skill) => warningsOf(skill).length > 0,
+		).length;
+
+		return (
+			<Box key={id} flexDirection="column" paddingLeft={2} marginTop="xs">
+				<Box flexDirection="row" gap={1} alignItems="center">
+					{!isForced && (
+						<Button
+							key={`fold:${id}`}
+							plain
+							onPress={() => void toggle($, id)}
+						>
+							{`${isOpen ? '▾' : '▸'} ${label} (${tally ?? skills.length})`}
+						</Button>
+					)}
+					{isForced && (
+						<Text>{`▾ ${label} (${tally ?? skills.length})`}</Text>
+					)}
+					{badge && (
+						<Text color="warning" size="caption">
+							{badge}
+						</Text>
+					)}
+					{!isOpen && issues > 0 && (
+						<Text color="warning" size="caption">
+							⚠ {issues}
+						</Text>
+					)}
+				</Box>
+				{isOpen && tags && (
+					<Box paddingLeft={2}>
+						<Text dimColor size="footnote">
+							{tags}
+						</Text>
+					</Box>
+				)}
+				{isOpen && skills.map(row)}
+			</Box>
+		);
+	};
+
+	// What a plugin adds to every session: its skills that are on, and any
+	// commands written as files.
+	const pluginCost = (plugin: PluginInfo): string => {
+		const total = [...data.skills, ...data.commands]
+			.filter(
+				(one) => one.group === plugin.name && one.source === 'plugin',
+			)
+			.filter((one) => !one.isOff)
+			.reduce((sum, one) => sum + (one.tokens ?? 0), 0);
+		if (total === 0) return 'no context cost';
+
+		return total >= 1000
+			? `≈ ${(total / 1000).toFixed(1)}k tokens each session`
+			: `≈ ${total} tokens each session`;
+	};
+
+	const pluginTags = (plugin: PluginInfo): string =>
+		[
+			plugin.version ? `v${plugin.version}` : '',
+			plugin.author ? `by ${plugin.author}` : '',
+			plugin.origin === 'dev folder' ? 'local folder' : '',
+			pluginCost(plugin),
+		]
+			.filter(Boolean)
+			.join(' · ');
+
+	const plural = (count: number, word: string): string =>
+		`${count} ${word}${count === 1 ? '' : 's'}`;
+
+	// A plugin with no skills and no commands (hooks only): listed so the
+	// section shows every plugin Claude has loaded.
+	const bare = (plugin: PluginInfo) => (
+		<Box
+			key={`bare:${plugin.name}`}
+			flexDirection="row"
+			gap={1}
+			paddingLeft={2}
+			marginTop="xs"
+			alignItems="center"
+		>
+			<Text dimColor>{`  ${plugin.name}`}</Text>
+			<Text dimColor size="caption">
+				no skills or commands
+			</Text>
+		</Box>
+	);
+
+	const note = (text: string) => (
+		<Box paddingLeft={2}>
+			<Text dimColor>{text}</Text>
+		</Box>
+	);
+
+	const all = data.skills;
+	const hasIssue = (skill: SkillEntry) => warningsOf(skill).length > 0;
+	// What every session pays for the skill listing: each skill that is on.
+	const tokenTotal = all
+		.filter((skill) => !skill.isOff)
+		.reduce((sum, skill) => sum + (skill.tokens ?? 0), 0);
+	const stale = data.staleOverrides ?? [];
+	const counts: Record<SkillFilter, number> = {
+		local: all.length,
+		user: all.filter((skill) => skill.source === 'user').length,
+		project: all.filter((skill) => skill.source === 'project').length,
+		plugin: data.plugins.length,
+		off: all.filter((skill) => skill.isOff).length,
+		issues: all.filter(hasIssue).length + stale.length,
+		synced: all.filter((skill) => skill.source === 'synced').length,
+	};
+	const chips: Array<[SkillFilter, string]> = [
+		['local', 'All'],
+		['user', 'Local'],
+		['plugin', 'Plugins'],
+		['project', 'Project'],
+		['synced', 'Synced'],
+		['off', 'Off'],
+		['issues', 'Issues'],
+	];
+	// The Off and Issues chips are drawn only while they have something to
+	// show; a pane left on one that empties shows All.
+	const isEmptyChip = (value: SkillFilter) =>
+		(value === 'issues' || value === 'off') && counts[value] === 0;
+	const chosen: SkillFilter = isEmptyChip(picked) ? 'local' : picked;
+	const keeps = (skill: SkillEntry): boolean => {
+		if (chosen === 'local') return true;
+		if (chosen === 'off') return skill.isOff;
+		if (chosen === 'issues') return hasIssue(skill);
+
+		return skill.source === chosen;
+	};
+	const shown = all.filter(keeps);
+	const isAll = chosen === 'local';
+	const isAcross = chosen === 'off' || chosen === 'issues';
+	const user = shown.filter((skill) => skill.source === 'user');
+	const project = shown.filter((skill) => skill.source === 'project');
+	const plugins = shown.filter((skill) => skill.source === 'plugin');
+	const synced = shown.filter((skill) => skill.source === 'synced');
+	const listedPlugins =
+		isAll || chosen === 'plugin'
+			? data.plugins
+			: data.plugins.filter((plugin) =>
+					plugins.some((skill) => skill.group === plugin.name),
+				);
+	const time = new Date(data.scannedAt).toLocaleTimeString([], {
+		hour: 'numeric',
+		minute: '2-digit',
+	});
+	const syncedOn = data.syncedAt
+		? new Date(data.syncedAt).toLocaleDateString([], {
+				month: 'short',
+				day: 'numeric',
+			})
+		: undefined;
+	const showUser = isAll || user.length > 0 || chosen === 'user';
+	const showProject = isAll || project.length > 0 || chosen === 'project';
+	const showPlugins =
+		listedPlugins.length > 0 || isAll || chosen === 'plugin';
+	const showSynced = isAll || synced.length > 0 || chosen === 'synced';
+	// Leftover settings are an issue to fix, so they show under Issues only.
+	const shownStale = chosen === 'issues' ? stale : [];
+	const openUser = showUser && !isClosed('local');
+	const openPlugins = showPlugins && !isClosed('plugins');
+	const openProject = showProject && !isClosed('project');
+	const openSynced = showSynced && !isClosed('synced');
+	const tokenText =
+		tokenTotal >= 1000
+			? `${(tokenTotal / 1000).toFixed(1)}k`
+			: `${tokenTotal}`;
+
+	return (
+		<Box flexDirection="column">
+			<Box
+				flexDirection="row"
+				justifyContent="space-between"
+				alignItems="center"
+			>
+				<Text dimColor size="footnote">
+					{all.length} skills · {counts.off} off · ≈ {tokenText}{' '}
+					tokens each session · read {time}
+				</Text>
+				<Box flexDirection="row" gap={1}>
+					<Button
+						label="Refresh"
+						dimColor
+						onPress={() => {
+							void rescan($);
+							void checkForUpdates($, true).catch(
+								() => undefined,
+							);
+						}}
+					/>
+				</Box>
+			</Box>
+
+			{/* Once the keys go back to the prompt (Esc, typing), nothing in the
+			    pane answers them, and the way back is not shown anywhere. The
+			    first ctrl+x tab stops on a band above the prompt when one is up. */}
+			{e.surface === 'terminal' && !e.props.isFocused && (
+				<Box marginTop="xs">
+					<Text color="warning" size="footnote">
+						Keys are in the prompt · ctrl+x tab (twice if it stops
+						above the prompt) or /loadout to use this pane
+					</Text>
+				</Box>
+			)}
+
+			{shownNotice && (
+				<Box marginTop="xs">
+					<Text
+						color={shownNotice.isError ? 'warning' : 'success'}
+						size="footnote"
+					>
+						{`${shownNotice.isError ? '⚠' : '✓'} ${shownNotice.text}`}
+					</Text>
+				</Box>
+			)}
+
+			{Object.keys(available).length > 0 && (
+				<Box flexDirection="column" marginTop="xs">
+					{Object.entries(available).map(([key, version]) => (
+						<Box
+							key={`update-row:${key}`}
+							flexDirection="row"
+							alignItems="center"
+							gap={1}
+						>
+							<Text color="warning" size="footnote">
+								{`⬆ ${key.split('@')[0]} ${version.latest} is out (you have ${version.current})`}
+							</Text>
+							<Button
+								key={`update:${key}`}
+								label="Update"
+								onPress={(press) =>
+									void updatePlugin($, key, press.surface)
+								}
+							/>
+						</Box>
+					))}
+				</Box>
+			)}
+
+			<Box flexDirection="row" flexWrap="wrap" gap={1} marginTop={1}>
+				{chips
+					.filter(([value]) => !isEmptyChip(value))
+					.map(([value, label]) => (
+						<Button
+							key={`chip:${value}`}
+							variant={chosen === value ? 'primary' : 'secondary'}
+							onPress={() => void update($, filter, () => value)}
+						>
+							{`${label} ${counts[value]}`}
+						</Button>
+					))}
+			</Box>
+
+			{!isAll && shown.length + shownStale.length === 0 && (
+				<Box marginTop={1}>{note('Nothing matches this filter.')}</Box>
+			)}
+
+			{showUser &&
+				heading(
+					'Local',
+					data.userDir,
+					SOURCE_COLOR.user,
+					user.length,
+					countOff(user),
+					'local',
+				)}
+			{openUser && user.length === 0 && note('No skills in this folder.')}
+			{openUser && user.map(row)}
+
+			{showPlugins &&
+				heading(
+					'Plugins',
+					'enabled',
+					SOURCE_COLOR.plugin,
+					`${listedPlugins.length} · ${plugins.length} skills`,
+					countOff(plugins),
+					'plugins',
+				)}
+			{openPlugins &&
+				listedPlugins.length === 0 &&
+				note('No enabled plugins.')}
+			{openPlugins &&
+				listedPlugins.map((plugin) => {
+					const own = plugins.filter(
+						(skill) => skill.group === plugin.name,
+					);
+					const commands = isAcross
+						? []
+						: data.commands.filter(
+								(command) => command.group === plugin.name,
+							);
+					if (own.length + commands.length === 0) return bare(plugin);
+					const tally = [
+						own.length ? plural(own.length, 'skill') : '',
+						commands.length
+							? plural(commands.length, 'command')
+							: '',
+					]
+						.filter(Boolean)
+						.join(' · ');
+
+					const newer = plugin.marketplace
+						? available[`${plugin.name}@${plugin.marketplace}`]
+						: undefined;
+
+					return fold(
+						`group:${plugin.name}`,
+						plugin.name,
+						[...own, ...commands],
+						isAcross,
+						pluginTags(plugin),
+						tally,
+						newer ? `⬆ ${newer.latest} available` : undefined,
+					);
+				})}
+
+			{showProject &&
+				heading(
+					'Project',
+					'.claude/skills',
+					SOURCE_COLOR.project,
+					project.length,
+					countOff(project),
+					'project',
+				)}
+			{openProject &&
+				project.length === 0 &&
+				note('None in this project.')}
+			{openProject && project.map(row)}
+
+			{showSynced &&
+				heading(
+					'claude.ai account',
+					syncedOn
+						? `enabled only · synced ${syncedOn}`
+						: 'enabled only',
+					SOURCE_COLOR.synced,
+					synced.length,
+					countOff(synced),
+					'synced',
+				)}
+			{openSynced &&
+				synced.length === 0 &&
+				note('No synced account skills.')}
+			{openSynced &&
+				ACCOUNT_GROUPS.map(([group, label]) => {
+					const members = synced.filter(
+						(skill) => skill.accountGroup === group,
+					);
+
+					return (
+						members.length > 0 &&
+						fold(`group:synced-${group}`, label, members, !isAll)
+					);
+				})}
+
+			{shownStale.length > 0 &&
+				heading(
+					'Leftover settings',
+					'turned off, but the skill is gone',
+					'warning',
+					plural(shownStale.length, 'stale entry').replace(
+						'entrys',
+						'entries',
+					),
+					0,
+					'leftover',
+				)}
+			{!isClosed('leftover') &&
+				shownStale.map((entry) => (
+					<Box
+						key={`stale:${entry.key}`}
+						flexDirection="column"
+						paddingLeft={2}
+						marginTop="xs"
+					>
+						<Box flexDirection="row" alignItems="center" gap={1}>
+							<Text color="warning">●</Text>
+							<Text>{entry.key}</Text>
+							<Text color="warning" size="caption">
+								⚠ Still set to "{entry.value}" in
+								skillOverrides, but no skill has this name
+							</Text>
+						</Box>
+						<Box paddingLeft={4} flexDirection="row" marginTop="xs">
+							<Button
+								key={`remove-override:${entry.key}`}
+								label="Remove from settings"
+								onPress={() => void removeStale($, entry.key)}
+							/>
+						</Box>
+					</Box>
+				))}
+		</Box>
+	);
+}
+
 export const register: Register = (on) => {
+	// The ring's stops as last drawn, and the one it is on.
+	let ring: string[] = [];
+	let ringAt: string | undefined;
+	// Where the session draws, as it started.
+	let surface: string | undefined;
+
 	on('session.start', async ($, e, next) => {
+		surface = e.surface;
 		await $.command.register({
 			name: 'loadout',
 			description:
@@ -1892,13 +2875,21 @@ export const register: Register = (on) => {
 		return next(e);
 	});
 
-	on('command.run', { command: 'loadout' }, async ($) => {
+	on('command.run', { command: 'loadout' }, async ($, e) => {
 		await rescan($);
 		// Focus hands the pane the keyboard; without it the keys stay in the
 		// prompt and nothing in the pane answers until ctrl+x tab or a click.
 		const opened = await $.ui.open({ id: PANE, title: TITLE, focus: true });
 		if (!opened.isPlaced) {
 			return { text: `Loadout could not be shown: ${opened.reason}` };
+		}
+
+		// The terminal docks a pane beside the chat only in its fullscreen
+		// renderer; on the main screen it opens above the prompt instead.
+		if (surface === 'terminal' && e.presentation?.isFullscreen === false) {
+			return {
+				text: 'Loadout opened above the prompt. To have it beside the chat, run /tui fullscreen once.',
+			};
 		}
 
 		return { text: 'Loadout opened.' };
@@ -1912,923 +2903,34 @@ export const register: Register = (on) => {
 	});
 
 	on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-		const { Box, Text, Button } = $.ui.resolve(e);
-		const data = await read($, scan);
-		const expanded = await read($, open);
-		const picked = await read($, filter);
-		const used = await read($, usage);
-		const waiting = await read($, confirm);
-		const shownNotice = await read($, notice);
-		const available = await read($, updates);
+		const tree = await drawPane($, e);
+		const stops = ringStops(tree);
+		ring = stops.map((stop) => String(stop.props?.key));
+		const start = ringStart(stops);
 
-		if (!data) {
-			return (
-				<Box flexDirection="column" gap={1}>
-					<Text dimColor>Reading your skills…</Text>
-					<Button label="Refresh" onPress={() => void rescan($)} />
-				</Box>
-			);
-		}
+		return start === undefined ? tree : withAutoFocus(tree, start);
+	});
 
-		const has = (skill: SkillEntry, code: SkillProblem['code']) =>
-			skill.problems.some((problem) => problem.code === code);
+	on(
+		'ui.focus',
+		{ component: 'Pane', requestId: PANE },
+		async ($, e, next) => {
+			const result = await next(e);
+			if (result.deny === undefined) ringAt = e.element;
 
-		// A button with a label that shows while the pointer is over it: a
-		// hidden Box beside the button, revealed by its keyed wrapper's hover, sized
-		// to its text so it never wraps to the button's width. Buttons have no
-		// tooltip of their own.
-		// What an expanded row offers: Insert for a healthy skill; for a flagged
-		// one, the fixes its problems call for instead.
-		const actions = (skill: SkillEntry) => {
-			const folder = skill.folder ?? '';
-			const duplicate = skill.problems.find(
-				(problem) => problem.code === 'duplicate',
-			);
-			const pluginInfo =
-				skill.source === 'plugin'
-					? data.plugins.find((plugin) => plugin.name === skill.group)
-					: undefined;
-			// Only Local and Project skills are yours to open and edit: plugin files
-			// are a cache or a repo of their own, account skills a synced copy.
-			const isEditable =
-				skill.source === 'user' || skill.source === 'project';
-			// Open: the SKILL.md in VS Code, or the default text editor.
-			const edit = isEditable && skill.file && (
-				<Button
-					key={`edit:${skill.id}`}
-					label="VS Code ↗"
-					onPress={() => void openFile($, skill.file ?? '')}
-				/>
-			);
-			const finder = isEditable && skill.folder && (
-				<Button
-					key={`reveal:${skill.id}`}
-					label="Finder ↗"
-					onPress={() => void reveal($, skill.folder ?? '')}
-				/>
-			);
-			const account = skill.source === 'synced' && skill.isAccountOwn && (
-				<Button
-					key={`account:${skill.id}`}
-					label="Skills ↗"
-					onPress={() => void openAccountSkills($)}
-				/>
-			);
-			const pluginPage = pluginInfo && (
-				<Button
-					key={`plugin-page:${skill.id}`}
-					label="Plugins ↗"
-					onPress={() => void openPluginPage($, pluginInfo)}
-				/>
-			);
-			// Remove is on every Local skill, and picks the way that undoes how it got
-			// there: npx skills, a shortcut, or a real folder. A Project skill is the
-			// repo's: it is removed through git, not here.
-			const canDelete =
-				data.isMac && Boolean(skill.folder) && skill.source === 'user';
-			const deleteKey = `delete:${skill.id}`;
-			const remove =
-				canDelete &&
-				(waiting === deleteKey ? (
-					[
-						<Button
-							key={`confirm-delete:${skill.id}`}
-							variant="primary"
-							label={
-								skill.npxName
-									? 'Confirm: uninstall'
-									: skill.linkTarget
-										? 'Confirm: delete shortcut'
-										: 'Confirm: move to Trash'
-							}
-							onPress={(press) =>
-								skill.npxName
-									? void uninstallNpxSkill(
-											$,
-											skill,
-											skill.npxName,
-										)
-									: void deleteSkill(
-											$,
-											skill.folder ?? '',
-											overrideKeysOf(skill),
-										)
-							}
-						/>,
-						<Button
-							key={`cancel:${skill.id}`}
-							label="Cancel"
-							onPress={() => void update($, confirm, () => '')}
-						/>,
-					]
-				) : (
-					<Button
-						key={deleteKey}
-						label={
-							skill.npxName
-								? 'Uninstall'
-								: skill.linkTarget
-									? 'Delete shortcut'
-									: 'Trash'
-						}
-						onPress={(press) =>
-							void confirmThen($, {
-								key: deleteKey,
-								...deleteQuestion(skill),
-								run: () =>
-									skill.npxName
-										? uninstallNpxSkill(
-												$,
-												skill,
-												skill.npxName,
-											)
-										: deleteSkill(
-												$,
-												skill.folder ?? '',
-												overrideKeysOf(skill),
-											),
-							})
-						}
-					/>
-				));
-			const turnOff = !skill.isOff &&
-				skill.kind !== 'command' &&
-				skill.file && (
-					<Button
-						key={`turn-off:${skill.id}`}
-						label="Turn off"
-						onPress={() => void turnSkillOff($, skill)}
-					/>
-				);
-			const turnOn = skill.isOff && skill.kind !== 'command' && (
-				<Button
-					key={`turn-on:${skill.id}`}
-					variant="primary"
-					label="Turn on"
-					onPress={() => void turnSkillOn($, skill)}
-				/>
-			);
-			if (warningsOf(skill).length === 0) {
-				// Insert, Open and Finder lead; the actions that change things follow.
-				return [
-					// A skill that is off cannot run, so it has nothing to insert.
-					!skill.isOff && (
-						<Button
-							key={`insert:${skill.id}`}
-							label="Insert"
-							onPress={(press) =>
-								void insertCommand(
-									$,
-									skill.slash,
-									press.surface,
-								)
-							}
-						/>
-					),
-					edit,
-					finder,
-					account,
-					pluginPage,
-					turnOn,
-					turnOff,
-					remove,
-				]
-					.flat()
-					.filter(Boolean);
-			}
+			return result;
+		},
+	);
 
-			const folderName = folder.slice(folder.lastIndexOf('/') + 1);
-			const writes = (fix: () => Promise<void>) => () => void fix();
-			// Fixes write files, so only on Local skills: a Project skill's files are
-			// the repo's, fixed by hand.
-			const isLocal = skill.source === 'user';
+	on('ui.scroll', { component: 'Pane', requestId: PANE }, ($, e, next) => {
+		const to = ringStep(e, ring, ringAt);
+		if (to === undefined) return next(e);
+		// Not awaited: each raises its own event behind this one.
+		void $.ui
+			.focus({ requestId: PANE, key: to })
+			.then(() => $.ui.scroll({ to: { key: to }, in: PANE }))
+			.catch(() => undefined);
 
-			// A flagged skill leads with what fixes it; Open and Finder follow.
-			return [
-				isLocal && has(skill, 'no-skill-md') && folder && (
-					<Button
-						key={`create:${skill.id}`}
-						variant="primary"
-						label="Create SKILL.md"
-						onPress={writes(() =>
-							createSkillFile($, folder, skill.name),
-						)}
-					/>
-				),
-				isLocal && has(skill, 'no-frontmatter') && skill.file && (
-					<Button
-						key={`frontmatter:${skill.id}`}
-						variant="primary"
-						label="Add frontmatter"
-						onPress={writes(() =>
-							addFrontmatter($, skill.file ?? '', folderName),
-						)}
-					/>
-				),
-				isLocal &&
-					has(skill, 'lowercase-file') &&
-					skill.lowercaseFile && (
-						<Button
-							key={`rename:${skill.id}`}
-							variant="primary"
-							label="Rename to SKILL.md"
-							onPress={writes(() =>
-								renameSkillFile(
-									$,
-									folder,
-									skill.lowercaseFile ?? '',
-								),
-							)}
-						/>
-					),
-				isLocal &&
-					has(skill, 'broken-link') &&
-					folder &&
-					(waiting === skill.id ? (
-						[
-							<Button
-								key={`confirm-remove:${skill.id}`}
-								variant="primary"
-								label="Confirm remove"
-								onPress={() => void removeLink($, folder)}
-							/>,
-							<Button
-								key={`cancel:${skill.id}`}
-								label="Cancel"
-								onPress={() =>
-									void update($, confirm, () => '')
-								}
-							/>,
-						]
-					) : (
-						<Button
-							key={`remove:${skill.id}`}
-							label="Remove link"
-							onPress={() =>
-								void confirmThen($, {
-									key: skill.id,
-									question: `Remove the broken shortcut ${skill.name} (nothing else is touched)?`,
-									ok: 'Remove link',
-									run: () => removeLink($, folder),
-								})
-							}
-						/>
-					)),
-				skill.offPlugin &&
-					(waiting === `uninstall:${skill.id}` ? (
-						[
-							<Button
-								key={`confirm-uninstall:${skill.id}`}
-								variant="primary"
-								label={
-									skill.offPlugin.isLastFromMarketplace
-										? `Confirm: uninstall ${skill.offPlugin.name} and its marketplace`
-										: `Confirm: uninstall ${skill.offPlugin.name}`
-								}
-								onPress={(press) =>
-									void uninstallPlugin(
-										$,
-										skill.offPlugin as OffPlugin,
-										press.surface,
-									)
-								}
-							/>,
-							<Button
-								key={`cancel:${skill.id}`}
-								label="Cancel"
-								onPress={() =>
-									void update($, confirm, () => '')
-								}
-							/>,
-						]
-					) : (
-						<Button
-							key={`uninstall:${skill.id}`}
-							label={`Uninstall ${skill.offPlugin.name} plugin`}
-							onPress={(press) => {
-								const plugin = skill.offPlugin as OffPlugin;
-								void confirmThen($, {
-									key: `uninstall:${skill.id}`,
-									question: plugin.isLastFromMarketplace
-										? `Uninstall the ${plugin.name} plugin and its ${plugin.marketplace} marketplace (nothing else uses it)?`
-										: `Uninstall the ${plugin.name} plugin?`,
-									ok: 'Uninstall',
-									run: () =>
-										uninstallPlugin(
-											$,
-											plugin,
-											press.surface,
-										),
-								});
-							}}
-						/>
-					)),
-				duplicate && (
-					<Button
-						key={`ask:${skill.id}`}
-						label="Ask Claude"
-						onPress={() => void askClaude($, skill, duplicate)}
-					/>
-				),
-				edit,
-				finder,
-				account,
-				pluginPage,
-				!has(skill, 'broken-link') && turnOn,
-				!has(skill, 'broken-link') && turnOff,
-				!has(skill, 'broken-link') && remove,
-			]
-				.flat()
-				.filter(Boolean);
-		};
-
-		// One labelled line of an expanded skill: a fixed label column, then the
-		// value, so file, cost and source read apart.
-		const detail = (label: string, value: string, isPath?: boolean) => (
-			<Box key={label} flexDirection="row" gap={1}>
-				<Box width={7} flexShrink={0}>
-					<Text dimColor size="footnote">
-						{label}
-					</Text>
-				</Box>
-				<Text size="footnote" mono={isPath} wrap="truncate-end">
-					{value}
-				</Text>
-			</Box>
-		);
-
-		const details = (skill: SkillEntry) => {
-			const isCosted = skill.tokens !== undefined;
-			const cost =
-				skill.tokens === 0
-					? "None: not in Claude's context"
-					: skill.isOff
-						? `≈ ${skill.tokens} tokens, none while off`
-						: `≈ ${skill.tokens} tokens every session`;
-
-			return (
-				<Box flexDirection="column" marginTop={1}>
-					{skill.path && detail('File', skill.path, true)}
-					{isCosted && detail('Cost', cost)}
-					{skill.origin && detail('Source', skill.origin)}
-				</Box>
-			);
-		};
-
-		const row = (skill: SkillEntry) => {
-			const isOpen = expanded.includes(skill.id);
-			const use = usageOf(used, skill);
-
-			return (
-				<Box
-					key={skill.id}
-					flexDirection="column"
-					paddingLeft={2}
-					marginTop="xs"
-				>
-					<Box flexDirection="row" alignItems="center" gap={1}>
-						<Text
-							color={SOURCE_COLOR[skill.source]}
-							dimColor={skill.isOff}
-						>
-							●
-						</Text>
-						<Button
-							key={`row:${skill.id}`}
-							plain
-							dimColor={skill.isOff}
-							onPress={() => void toggle($, skill.id)}
-						>
-							{`${isOpen ? '▾' : '▸'} ${skill.name}`}
-						</Button>
-						{skill.isOff && (
-							<Text color="error" bold size="caption">
-								OFF
-							</Text>
-						)}
-						{warningsOf(skill).length > 0 && (
-							<Text color="warning" size="caption">
-								⚠ {warningsOf(skill)[0]?.text}
-							</Text>
-						)}
-						{warningsOf(skill).length === 0 &&
-							hintsOf(skill).length > 0 && (
-								<Text dimColor size="caption">
-									ⓘ {hintsOf(skill)[0]?.text}
-								</Text>
-							)}
-						{use && (
-							<Text dimColor size="caption">
-								{use.count}× · {ago(use.last)}
-							</Text>
-						)}
-					</Box>
-					<Box paddingLeft={4} flexDirection="column">
-						<Text dimColor wrap={isOpen ? 'wrap' : 'truncate-end'}>
-							{isOpen
-								? skill.description
-								: oneLine(skill.description)}
-						</Text>
-						{isOpen &&
-							skill.problems.map((problem) =>
-								problem.isHint ? (
-									<Text dimColor size="footnote">
-										ⓘ {problem.text}
-									</Text>
-								) : (
-									<Text color="warning" size="footnote">
-										⚠ {problem.text}
-									</Text>
-								),
-							)}
-						{isOpen && details(skill)}
-						{isOpen && (
-							<Box
-								flexDirection="row"
-								flexWrap="wrap"
-								gap={1}
-								marginTop={skill.kind === 'command' ? 'xs' : 1}
-							>
-								{actions(skill)}
-							</Box>
-						)}
-					</Box>
-				</Box>
-			);
-		};
-
-		// A section's open state lives in the same list as the rows', under
-		// `closed:<section>`: sections start open.
-		const isClosed = (section: string) =>
-			expanded.includes(`closed:${section}`);
-
-		const heading = (
-			label: string,
-			where: string,
-			color: string,
-			count: number | string,
-			off: number,
-			section: string,
-		) => (
-			<Box
-				flexDirection="row"
-				justifyContent="space-between"
-				alignItems="center"
-				marginTop="md"
-				paddingX={1}
-				backgroundColor="#80808026"
-			>
-				<Box flexDirection="row" gap={1} alignItems="center">
-					<Text color={color}>●</Text>
-					<Button
-						key={`section:${section}`}
-						plain
-						onPress={() => void toggle($, `closed:${section}`)}
-					>
-						{`${isClosed(section) ? '▸' : '▾'} ${label.toUpperCase()}`}
-					</Button>
-					{where && (
-						<Text dimColor size="footnote">
-							{where}
-						</Text>
-					)}
-				</Box>
-				<Text dimColor size="footnote">
-					{off ? `${count} · ${off} off` : `${count}`}
-				</Text>
-			</Box>
-		);
-
-		const fold = (
-			id: string,
-			label: string,
-			skills: SkillEntry[],
-			isForced: boolean,
-			tags?: string,
-			tally?: string,
-			badge?: string,
-		) => {
-			const isOpen = isForced || expanded.includes(id);
-			const issues = skills.filter(
-				(skill) => warningsOf(skill).length > 0,
-			).length;
-
-			return (
-				<Box
-					key={id}
-					flexDirection="column"
-					paddingLeft={2}
-					marginTop="xs"
-				>
-					<Box flexDirection="row" gap={1} alignItems="center">
-						{!isForced && (
-							<Button
-								key={`fold:${id}`}
-								plain
-								onPress={() => void toggle($, id)}
-							>
-								{`${isOpen ? '▾' : '▸'} ${label} (${tally ?? skills.length})`}
-							</Button>
-						)}
-						{isForced && (
-							<Text>{`▾ ${label} (${tally ?? skills.length})`}</Text>
-						)}
-						{badge && (
-							<Text color="warning" size="caption">
-								{badge}
-							</Text>
-						)}
-						{!isOpen && issues > 0 && (
-							<Text color="warning" size="caption">
-								⚠ {issues}
-							</Text>
-						)}
-					</Box>
-					{isOpen && tags && (
-						<Box paddingLeft={2}>
-							<Text dimColor size="footnote">
-								{tags}
-							</Text>
-						</Box>
-					)}
-					{isOpen && skills.map(row)}
-				</Box>
-			);
-		};
-
-		// What a plugin adds to every session: its skills that are on, and any
-		// commands written as files.
-		const pluginCost = (plugin: PluginInfo): string => {
-			const total = [...data.skills, ...data.commands]
-				.filter(
-					(one) =>
-						one.group === plugin.name && one.source === 'plugin',
-				)
-				.filter((one) => !one.isOff)
-				.reduce((sum, one) => sum + (one.tokens ?? 0), 0);
-			if (total === 0) return 'no context cost';
-
-			return total >= 1000
-				? `≈ ${(total / 1000).toFixed(1)}k tokens each session`
-				: `≈ ${total} tokens each session`;
-		};
-
-		const pluginTags = (plugin: PluginInfo): string =>
-			[
-				plugin.version ? `v${plugin.version}` : '',
-				plugin.author ? `by ${plugin.author}` : '',
-				plugin.origin === 'dev folder' ? 'local folder' : '',
-				pluginCost(plugin),
-			]
-				.filter(Boolean)
-				.join(' · ');
-
-		const plural = (count: number, word: string): string =>
-			`${count} ${word}${count === 1 ? '' : 's'}`;
-
-		// A plugin with no skills and no commands (hooks only): listed so the
-		// section shows every plugin Claude has loaded.
-		const bare = (plugin: PluginInfo) => (
-			<Box
-				key={`bare:${plugin.name}`}
-				flexDirection="row"
-				gap={1}
-				paddingLeft={2}
-				marginTop="xs"
-				alignItems="center"
-			>
-				<Text dimColor>{`  ${plugin.name}`}</Text>
-				<Text dimColor size="caption">
-					no skills or commands
-				</Text>
-			</Box>
-		);
-
-		const note = (text: string) => (
-			<Box paddingLeft={2}>
-				<Text dimColor>{text}</Text>
-			</Box>
-		);
-
-		const all = data.skills;
-		const hasIssue = (skill: SkillEntry) => warningsOf(skill).length > 0;
-		// What every session pays for the skill listing: each skill that is on.
-		const tokenTotal = all
-			.filter((skill) => !skill.isOff)
-			.reduce((sum, skill) => sum + (skill.tokens ?? 0), 0);
-		const stale = data.staleOverrides ?? [];
-		const counts: Record<SkillFilter, number> = {
-			local: all.length,
-			user: all.filter((skill) => skill.source === 'user').length,
-			project: all.filter((skill) => skill.source === 'project').length,
-			plugin: data.plugins.length,
-			off: all.filter((skill) => skill.isOff).length,
-			issues: all.filter(hasIssue).length + stale.length,
-			synced: all.filter((skill) => skill.source === 'synced').length,
-		};
-		const chips: Array<[SkillFilter, string]> = [
-			['local', 'All'],
-			['user', 'Local'],
-			['plugin', 'Plugins'],
-			['project', 'Project'],
-			['synced', 'Synced'],
-			['off', 'Off'],
-			['issues', 'Issues'],
-		];
-		// The Off and Issues chips are drawn only while they have something to
-		// show; a pane left on one that empties shows All.
-		const isEmptyChip = (value: SkillFilter) =>
-			(value === 'issues' || value === 'off') && counts[value] === 0;
-		const chosen: SkillFilter = isEmptyChip(picked) ? 'local' : picked;
-		const keeps = (skill: SkillEntry): boolean => {
-			if (chosen === 'local') return true;
-			if (chosen === 'off') return skill.isOff;
-			if (chosen === 'issues') return hasIssue(skill);
-
-			return skill.source === chosen;
-		};
-		const shown = all.filter(keeps);
-		const isAll = chosen === 'local';
-		const isAcross = chosen === 'off' || chosen === 'issues';
-		const user = shown.filter((skill) => skill.source === 'user');
-		const project = shown.filter((skill) => skill.source === 'project');
-		const plugins = shown.filter((skill) => skill.source === 'plugin');
-		const synced = shown.filter((skill) => skill.source === 'synced');
-		const listedPlugins =
-			isAll || chosen === 'plugin'
-				? data.plugins
-				: data.plugins.filter((plugin) =>
-						plugins.some((skill) => skill.group === plugin.name),
-					);
-		const time = new Date(data.scannedAt).toLocaleTimeString([], {
-			hour: 'numeric',
-			minute: '2-digit',
-		});
-		const syncedOn = data.syncedAt
-			? new Date(data.syncedAt).toLocaleDateString([], {
-					month: 'short',
-					day: 'numeric',
-				})
-			: undefined;
-		const showUser = isAll || user.length > 0 || chosen === 'user';
-		const showProject = isAll || project.length > 0 || chosen === 'project';
-		const showPlugins =
-			listedPlugins.length > 0 || isAll || chosen === 'plugin';
-		const showSynced = isAll || synced.length > 0 || chosen === 'synced';
-		// Leftover settings are an issue to fix, so they show under Issues only.
-		const shownStale = chosen === 'issues' ? stale : [];
-		const openUser = showUser && !isClosed('local');
-		const openPlugins = showPlugins && !isClosed('plugins');
-		const openProject = showProject && !isClosed('project');
-		const openSynced = showSynced && !isClosed('synced');
-		const tokenText =
-			tokenTotal >= 1000
-				? `${(tokenTotal / 1000).toFixed(1)}k`
-				: `${tokenTotal}`;
-
-		return (
-			<Box flexDirection="column">
-				<Box
-					flexDirection="row"
-					justifyContent="space-between"
-					alignItems="center"
-				>
-					<Text dimColor size="footnote">
-						{all.length} skills · {counts.off} off · ≈ {tokenText}{' '}
-						tokens each session · read {time}
-					</Text>
-					<Box flexDirection="row" gap={1}>
-						<Button
-							label="Refresh"
-							dimColor
-							onPress={() => {
-								void rescan($);
-								void checkForUpdates($, true).catch(
-									() => undefined,
-								);
-							}}
-						/>
-					</Box>
-				</Box>
-
-				{shownNotice && (
-					<Box marginTop="xs">
-						<Text
-							color={shownNotice.isError ? 'warning' : 'success'}
-							size="footnote"
-						>
-							{`${shownNotice.isError ? '⚠' : '✓'} ${shownNotice.text}`}
-						</Text>
-					</Box>
-				)}
-
-				{Object.keys(available).length > 0 && (
-					<Box flexDirection="column" marginTop="xs">
-						{Object.entries(available).map(([key, version]) => (
-							<Box
-								key={`update-row:${key}`}
-								flexDirection="row"
-								alignItems="center"
-								gap={1}
-							>
-								<Text color="warning" size="footnote">
-									{`⬆ ${key.split('@')[0]} ${version.latest} is out (you have ${version.current})`}
-								</Text>
-								<Button
-									key={`update:${key}`}
-									label="Update"
-									onPress={(press) =>
-										void updatePlugin($, key, press.surface)
-									}
-								/>
-							</Box>
-						))}
-					</Box>
-				)}
-
-				<Box flexDirection="row" flexWrap="wrap" gap={1} marginTop={1}>
-					{chips
-						.filter(([value]) => !isEmptyChip(value))
-						.map(([value, label]) => (
-							<Button
-								key={`chip:${value}`}
-								// The ring starts on the chosen filter when the pane
-								// takes the keyboard: without it the ring sits on
-								// nothing, and Enter or the arrows do nothing until Tab.
-								autoFocus={chosen === value || undefined}
-								variant={
-									chosen === value ? 'primary' : 'secondary'
-								}
-								onPress={() =>
-									void update($, filter, () => value)
-								}
-							>
-								{`${label} ${counts[value]}`}
-							</Button>
-						))}
-				</Box>
-
-				{!isAll && shown.length + shownStale.length === 0 && (
-					<Box marginTop={1}>
-						{note('Nothing matches this filter.')}
-					</Box>
-				)}
-
-				{showUser &&
-					heading(
-						'Local',
-						data.userDir,
-						SOURCE_COLOR.user,
-						user.length,
-						countOff(user),
-						'local',
-					)}
-				{openUser &&
-					user.length === 0 &&
-					note('No skills in this folder.')}
-				{openUser && user.map(row)}
-
-				{showPlugins &&
-					heading(
-						'Plugins',
-						'enabled',
-						SOURCE_COLOR.plugin,
-						`${listedPlugins.length} · ${plugins.length} skills`,
-						countOff(plugins),
-						'plugins',
-					)}
-				{openPlugins &&
-					listedPlugins.length === 0 &&
-					note('No enabled plugins.')}
-				{openPlugins &&
-					listedPlugins.map((plugin) => {
-						const own = plugins.filter(
-							(skill) => skill.group === plugin.name,
-						);
-						const commands = isAcross
-							? []
-							: data.commands.filter(
-									(command) => command.group === plugin.name,
-								);
-						if (own.length + commands.length === 0)
-							return bare(plugin);
-						const tally = [
-							own.length ? plural(own.length, 'skill') : '',
-							commands.length
-								? plural(commands.length, 'command')
-								: '',
-						]
-							.filter(Boolean)
-							.join(' · ');
-
-						const newer = plugin.marketplace
-							? available[`${plugin.name}@${plugin.marketplace}`]
-							: undefined;
-
-						return fold(
-							`group:${plugin.name}`,
-							plugin.name,
-							[...own, ...commands],
-							isAcross,
-							pluginTags(plugin),
-							tally,
-							newer ? `⬆ ${newer.latest} available` : undefined,
-						);
-					})}
-
-				{showProject &&
-					heading(
-						'Project',
-						'.claude/skills',
-						SOURCE_COLOR.project,
-						project.length,
-						countOff(project),
-						'project',
-					)}
-				{openProject &&
-					project.length === 0 &&
-					note('None in this project.')}
-				{openProject && project.map(row)}
-
-				{showSynced &&
-					heading(
-						'claude.ai account',
-						syncedOn
-							? `enabled only · synced ${syncedOn}`
-							: 'enabled only',
-						SOURCE_COLOR.synced,
-						synced.length,
-						countOff(synced),
-						'synced',
-					)}
-				{openSynced &&
-					synced.length === 0 &&
-					note('No synced account skills.')}
-				{openSynced &&
-					ACCOUNT_GROUPS.map(([group, label]) => {
-						const members = synced.filter(
-							(skill) => skill.accountGroup === group,
-						);
-
-						return (
-							members.length > 0 &&
-							fold(
-								`group:synced-${group}`,
-								label,
-								members,
-								!isAll,
-							)
-						);
-					})}
-
-				{shownStale.length > 0 &&
-					heading(
-						'Leftover settings',
-						'turned off, but the skill is gone',
-						'warning',
-						plural(shownStale.length, 'stale entry').replace(
-							'entrys',
-							'entries',
-						),
-						0,
-						'leftover',
-					)}
-				{!isClosed('leftover') &&
-					shownStale.map((entry) => (
-						<Box
-							key={`stale:${entry.key}`}
-							flexDirection="column"
-							paddingLeft={2}
-							marginTop="xs"
-						>
-							<Box
-								flexDirection="row"
-								alignItems="center"
-								gap={1}
-							>
-								<Text color="warning">●</Text>
-								<Text>{entry.key}</Text>
-								<Text color="warning" size="caption">
-									⚠ Still set to "{entry.value}" in
-									skillOverrides, but no skill has this name
-								</Text>
-							</Box>
-							<Box
-								paddingLeft={4}
-								flexDirection="row"
-								marginTop="xs"
-							>
-								<Button
-									key={`remove-override:${entry.key}`}
-									label="Remove from settings"
-									onPress={() =>
-										void removeStale($, entry.key)
-									}
-								/>
-							</Box>
-						</Box>
-					))}
-			</Box>
-		);
+		return {};
 	});
 };
