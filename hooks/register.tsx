@@ -914,6 +914,10 @@ const filter = atom({ plugin: 'loadout', key: 'filter' } as const, 'local', {
 const open = atom({ plugin: 'loadout', key: 'open' } as const, [], {
 	shape: 'open-1',
 });
+// What the search box holds; empty lists everything.
+const query = atom({ plugin: 'loadout', key: 'query' } as const, '', {
+	shape: 'query-1',
+});
 const usage = atom(
 	{ plugin: 'loadout', key: 'usage' } as const,
 	{},
@@ -1914,7 +1918,10 @@ function ringStops(node: unknown, into: Drawn[] = []): Drawn[] {
 	return into;
 }
 
-/** The ring's first stop: the first skill row, else the chosen filter. */
+/**
+ * The ring's first stop: the search box, else the first skill row, else the
+ * chosen filter.
+ */
 function ringStart(stops: readonly Drawn[]): string | undefined {
 	const keys = stops.map((stop) => String(stop.props?.key));
 	const chosen = stops.find(
@@ -1924,6 +1931,7 @@ function ringStart(stops: readonly Drawn[]): string | undefined {
 	);
 
 	return (
+		keys.find((key) => key === 'search') ??
 		keys.find((key) => key.startsWith('row:')) ??
 		(chosen ? String(chosen.props?.key) : undefined)
 	);
@@ -1978,10 +1986,11 @@ export function ringStep(
 }
 
 async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
-	const { Box, Text, Button } = $.ui.resolve(e);
+	const { Box, Text, Button, Input } = $.ui.resolve(e);
 	const data = await read($, scan);
 	const expanded = await read($, open);
 	const picked = await read($, filter);
+	const searched = await read($, query);
 	const used = await read($, usage);
 	const waiting = await read($, confirm);
 	const shownNotice = await read($, notice);
@@ -2578,7 +2587,17 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 	const isEmptyChip = (value: SkillFilter) =>
 		(value === 'issues' || value === 'off') && counts[value] === 0;
 	const chosen: SkillFilter = isEmptyChip(picked) ? 'local' : picked;
+	// The search matches a skill or command by its name, its description or
+	// the plugin it comes from, ignoring case.
+	const needle = searched.trim().toLowerCase();
+	const isSearching = needle !== '';
+	const matches = (one: SkillEntry): boolean =>
+		!isSearching ||
+		[one.name, one.description, one.group].some((text) =>
+			text.toLowerCase().includes(needle),
+		);
 	const keeps = (skill: SkillEntry): boolean => {
+		if (!matches(skill)) return false;
 		if (chosen === 'local') return true;
 		if (chosen === 'off') return skill.isOff;
 		if (chosen === 'issues') return hasIssue(skill);
@@ -2586,17 +2605,29 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 		return skill.source === chosen;
 	};
 	const shown = all.filter(keeps);
-	const isAll = chosen === 'local';
+	// All, with nothing searched: every section shows, empty ones too.
+	const isAll = chosen === 'local' && !isSearching;
+	// Folds open by themselves while a search or an across-filter picks rows.
+	const isPicking = isSearching || chosen === 'off' || chosen === 'issues';
 	const isAcross = chosen === 'off' || chosen === 'issues';
 	const user = shown.filter((skill) => skill.source === 'user');
 	const project = shown.filter((skill) => skill.source === 'project');
 	const plugins = shown.filter((skill) => skill.source === 'plugin');
 	const synced = shown.filter((skill) => skill.source === 'synced');
 	const listedPlugins =
-		isAll || chosen === 'plugin'
+		(isAll || chosen === 'plugin') && !isSearching
 			? data.plugins
-			: data.plugins.filter((plugin) =>
-					plugins.some((skill) => skill.group === plugin.name),
+			: data.plugins.filter(
+					(plugin) =>
+						plugins.some((skill) => skill.group === plugin.name) ||
+						(isSearching &&
+							!isAcross &&
+							(plugin.name.toLowerCase().includes(needle) ||
+								data.commands.some(
+									(command) =>
+										command.group === plugin.name &&
+										matches(command),
+								))),
 				);
 	const time = new Date(data.scannedAt).toLocaleTimeString([], {
 		hour: 'numeric',
@@ -2608,11 +2639,16 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 				day: 'numeric',
 			})
 		: undefined;
-	const showUser = isAll || user.length > 0 || chosen === 'user';
-	const showProject = isAll || project.length > 0 || chosen === 'project';
+	const showUser =
+		isAll || user.length > 0 || (chosen === 'user' && !isSearching);
+	const showProject =
+		isAll || project.length > 0 || (chosen === 'project' && !isSearching);
 	const showPlugins =
-		listedPlugins.length > 0 || isAll || chosen === 'plugin';
-	const showSynced = isAll || synced.length > 0 || chosen === 'synced';
+		listedPlugins.length > 0 ||
+		isAll ||
+		(chosen === 'plugin' && !isSearching);
+	const showSynced =
+		isAll || synced.length > 0 || (chosen === 'synced' && !isSearching);
 	// Leftover settings are an issue to fix, so they show under Issues only.
 	const shownStale = chosen === 'issues' ? stale : [];
 	const openUser = showUser && !isClosed('local');
@@ -2710,9 +2746,59 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 					))}
 			</Box>
 
-			{!isAll && shown.length + shownStale.length === 0 && (
-				<Box marginTop={1}>{note('Nothing matches this filter.')}</Box>
-			)}
+			<Box flexDirection="row" alignItems="center" gap={1} marginTop={1}>
+				{/* Before the box, so Down from it goes to the first match, and
+				    drawn even with nothing searched: the ring holds a place, not
+				    an element, so one that appears in front of the box as you
+				    type would take the focus from it. */}
+				<Button
+					key="search-clear"
+					// Enter empties the box the way the prompt empties on send,
+					// so the search it applied is named here.
+					label={isSearching ? `✕ ${searched.trim()}` : 'Clear'}
+					dimColor={!isSearching}
+					onPress={() => void update($, query, () => '')}
+				/>
+				<Input
+					key="search"
+					placeholder="Search skills and plugins"
+					value={searched}
+					submitLabel="first match"
+					onInput={(value) => void update($, query, () => value)}
+					onSubmit={(value) => {
+						void update($, query, () => value);
+						// Enter leaves the box for the first match.
+						const first = paneRing
+							.slice(paneRing.indexOf('search') + 1)
+							.find(
+								(key) =>
+									key.startsWith('row:') ||
+									key.startsWith('fold:'),
+							);
+						if (first) {
+							ringAt = first;
+							void $.ui
+								.focus({ requestId: PANE, key: first })
+								.catch(() => undefined);
+						}
+					}}
+				/>
+			</Box>
+
+			{isSearching &&
+				shown.length === 0 &&
+				listedPlugins.length === 0 && (
+					<Box marginTop={1}>
+						{note(`Nothing matches “${searched.trim()}”.`)}
+					</Box>
+				)}
+			{!isSearching &&
+				!isAll &&
+				shown.length + shownStale.length === 0 && (
+					<Box marginTop={1}>
+						{note('Nothing matches this filter.')}
+					</Box>
+				)}
 
 			{showUser &&
 				heading(
@@ -2746,7 +2832,9 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 					const commands = isAcross
 						? []
 						: data.commands.filter(
-								(command) => command.group === plugin.name,
+								(command) =>
+									command.group === plugin.name &&
+									matches(command),
 							);
 					if (own.length + commands.length === 0) return bare(plugin);
 					const tally = [
@@ -2766,7 +2854,7 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 						`group:${plugin.name}`,
 						plugin.name,
 						[...own, ...commands],
-						isAcross,
+						isPicking,
 						pluginTags(plugin),
 						tally,
 						newer ? `⬆ ${newer.latest} available` : undefined,
@@ -2854,10 +2942,13 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 	);
 }
 
+// The pane's ring stops as last drawn, and the one it is on. Loadout keeps
+// the latter itself where it moves the ring: the engine runs no hook of a
+// plugin's own for a move that plugin made.
+let paneRing: string[] = [];
+let ringAt: string | undefined;
+
 export const register: Register = (on) => {
-	// The ring's stops as last drawn, and the one it is on.
-	let ring: string[] = [];
-	let ringAt: string | undefined;
 	// Where the session draws, as it started.
 	let surface: string | undefined;
 
@@ -2876,6 +2967,7 @@ export const register: Register = (on) => {
 	});
 
 	on('command.run', { command: 'loadout' }, async ($, e) => {
+		await update($, query, () => '');
 		await rescan($);
 		// Focus hands the pane the keyboard; without it the keys stay in the
 		// prompt and nothing in the pane answers until ctrl+x tab or a click.
@@ -2905,7 +2997,7 @@ export const register: Register = (on) => {
 	on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
 		const tree = await drawPane($, e);
 		const stops = ringStops(tree);
-		ring = stops.map((stop) => String(stop.props?.key));
+		paneRing = stops.map((stop) => String(stop.props?.key));
 		const start = ringStart(stops);
 
 		return start === undefined ? tree : withAutoFocus(tree, start);
@@ -2923,8 +3015,9 @@ export const register: Register = (on) => {
 	);
 
 	on('ui.scroll', { component: 'Pane', requestId: PANE }, ($, e, next) => {
-		const to = ringStep(e, ring, ringAt);
+		const to = ringStep(e, paneRing, ringAt);
 		if (to === undefined) return next(e);
+		ringAt = to;
 		// Not awaited: each raises its own event behind this one.
 		void $.ui
 			.focus({ requestId: PANE, key: to })

@@ -77,7 +77,7 @@ claude plugin uninstall loadout@claude-loadout
 
    **In a terminal**, the pane docks beside the chat only in Claude Code's fullscreen renderer: run `/tui fullscreen` once to turn it on for every session. Without it, the pane opens above the prompt. If the keys go back to the prompt, press <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>Tab</kbd> (twice if a mod puts a bar above the prompt) or run `/loadout` again.
 
-2. Pick a chip to narrow the list, or stay on **All**.
+2. Type to search: the list narrows to skills and commands whose name, description or plugin matches, as you type. Press <kbd>↓</kbd> or <kbd>Enter</kbd> to reach the first match, and the **✕** button in front of the box to clear the search. Or pick a chip to narrow the list.
 3. Click a skill to read its full description and see where its file lives.
 4. In an expanded skill, click **Insert** to start a prompt with it, or **VS Code ↗** to edit it.
 
@@ -94,6 +94,7 @@ claude plugin uninstall loadout@claude-loadout
 | **Plugins** | Each enabled plugin, including ones loaded from `CLAUDE_CODE_PLUGIN_DIRS`, with its skills and its slash commands, even ones a mod registers in code |
 | **claude.ai account** | Only the account skills that are turned on |
 
+- **Search as you type**: by name, description or plugin, across every section, opening folded plugin groups that hold a match
 - **Filter chips**: All, Local, Plugins, Project, Synced, Off, Issues
 - **Collapsible sections**: click a heading (Local, Plugins, Project, …) to close or open it
 - **What each skill does**: a one-line summary from its `SKILL.md`, expanded to the full description with a click

@@ -1447,29 +1447,75 @@ test('/loadout says why when the pane could not be placed', async ($, on) => {
 	expect(text).toMatch(/no-surface/);
 });
 
-test('the focused pane starts its ring on the first skill row, so Enter opens it', async ($, on) => {
+test('the focused pane starts its ring on the search box, so typing searches at once', async ($, on) => {
 	engine(on);
 	const ui = await mount($, 'terminal');
 
-	const focused = (await ui.findAll({ type: 'Button' })).filter(
-		(button) => button.props.autoFocus === true,
-	);
-	const rows = (await ui.findAll({ type: 'Button' })).filter((button) =>
-		button.key?.startsWith('row:'),
-	);
-	expect(focused.map((button) => button.key)).toEqual([rows[0]?.key]);
+	const focused = [
+		...(await ui.findAll({ type: 'Button' })),
+		...(await ui.findAll({ type: 'Input' })),
+	].filter((element) => element.props.autoFocus === true);
+	expect(focused.map((element) => element.key)).toEqual(['search']);
 	await ui.unmount();
 });
 
-test('with no skill row drawn the ring starts on the chosen filter', async ($, on) => {
+test('typing in the search box narrows every section to the matches', async ($, on) => {
 	engine(on);
 	const ui = await mount($, 'terminal');
-	await ui.press({ key: 'chip:project' });
+	await ui.input({ key: 'search', text: 'commit' });
 
-	const focused = (await ui.findAll({ type: 'Button' })).filter(
-		(button) => button.props.autoFocus === true,
+	// gac matches by its description; cr does not.
+	expect(
+		await ui.find({ type: 'Button', key: 'row:user:user:gac' }),
+	).toBeDefined();
+	expect(
+		await ui.find({ type: 'Button', key: 'row:user:user:cr' }),
+	).toBeUndefined();
+	expect(await ui.find({ type: 'Button', text: /pdf/ })).toBeUndefined();
+	await ui.unmount();
+});
+
+test('a match inside a folded plugin shows without opening the fold', async ($, on) => {
+	engine(on);
+	const ui = await mount($, 'terminal');
+	await ui.input({ key: 'search', text: 'PLAN' });
+
+	expect((await ui.find({ type: 'Button', text: /plan/ }))?.text).toMatch(
+		/plan/,
 	);
-	expect(focused.map((button) => button.key)).toEqual(['chip:project']);
+	expect(
+		await ui.find({ type: 'Button', key: 'row:user:user:gac' }),
+	).toBeUndefined();
+	await ui.unmount();
+});
+
+test('a search with no match says so, and Clear brings everything back', async ($, on) => {
+	engine(on);
+	const ui = await mount($, 'terminal');
+	await ui.input({ key: 'search', text: 'zzz-nothing' });
+	expect(
+		(await ui.find({ type: 'Text', text: /Nothing matches/ }))?.text,
+	).toMatch(/zzz-nothing/);
+
+	expect((await ui.find({ type: 'Button', key: 'search-clear' }))?.text).toBe(
+		'✕ zzz-nothing',
+	);
+	await ui.press({ key: 'search-clear' });
+	expect(
+		await ui.find({ type: 'Button', key: 'row:user:user:cr' }),
+	).toBeDefined();
+	await ui.unmount();
+});
+
+test('/loadout starts with an empty search', async ($, on) => {
+	engine(on);
+	const ui = await mount($, 'terminal');
+	await ui.input({ key: 'search', text: 'commit' });
+	await $.command.run({ command: 'loadout' });
+
+	expect(
+		await ui.find({ type: 'Button', key: 'row:user:user:cr' }),
+	).toBeDefined();
 	await ui.unmount();
 });
 

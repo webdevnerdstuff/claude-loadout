@@ -112,6 +112,7 @@ declare module 'claude-code' {
 			scan: Shaped<SkillScan | null>;
 			open: Shaped<string[]>;
 			filter: Shaped<SkillFilter>;
+			query: Shaped<string>;
 			usage: Shaped<SkillUsage>;
 			confirm: Shaped<string>;
 			cleared: Shaped<string[]>;
