@@ -191,6 +191,8 @@ type Engine = {
 	opens: Record<string, unknown>[];
 	// What ui.open answers: placed, unless a test says why not.
 	notPlaced?: string;
+	// CLAUDE_CODE_PLUGIN_DIRS, read when the scan runs.
+	pluginDirs: string;
 };
 
 // Every hook here stands for the engine beneath the plugin: the file system,
@@ -207,6 +209,7 @@ function engine(
 		runs: [],
 		writes: {},
 		opens: [],
+		pluginDirs: '/dev/mover',
 	};
 	on('command.register', () => ({ value: { command: 'loadout' } }));
 	on('ui.open', (_, e) => {
@@ -222,7 +225,7 @@ function engine(
 	on('session.start', (_, e) => ({ cwd: e.cwd }));
 	on('session.root', () => ({ value: '/project' }));
 	on('env.get', (_, e) => ({
-		value: e.name === 'HOME' ? HOME : '/dev/mover',
+		value: e.name === 'HOME' ? HOME : state.pluginDirs,
 	}));
 	on('settings.read', () => ({ value: settings }));
 	on('store.get', (_, e) => ({ value: state.stored[e.key] }));
@@ -1124,6 +1127,139 @@ test('each plugin shows its author', async ($, on) => {
 	expect((await ui.find({ type: 'Text', text: /Tool Maker/ }))?.text).toMatch(
 		/^v1\.2\.0 · by Tool Maker · ≈ \d+ tokens each session$/,
 	);
+	await ui.unmount();
+});
+
+// The labels over the Plugins section's groups, in the order drawn. While a
+// search holds the groups open they are plain Text (no key), found by words.
+const sourceLabels = async (ui: Awaited<ReturnType<typeof mount>>) =>
+	(await ui.findAll({ type: 'Button' }))
+		.filter((element) => String(element.key).startsWith('source:'))
+		.map((element) => element.text);
+const heldLabels = async (ui: Awaited<ReturnType<typeof mount>>) =>
+	(await ui.findAll({ type: 'Text' }))
+		.map((element) => element.text)
+		.filter((text) => /^▾ (market|abc|Local folder)$/.test(text ?? ''));
+
+test('plugins sit under their marketplace, A to Z, and folder plugins last', async ($, on) => {
+	const files: Record<string, Node> = {
+		...FILES,
+		[`${HOME}/.claude/plugins/installed_plugins.json`]: {
+			kind: 'file',
+			text: JSON.stringify({
+				plugins: {
+					'tools@market': [
+						{ scope: 'user', installPath: '/plugins/tools' },
+					],
+					'hooks-only@market': [
+						{ scope: 'user', installPath: '/plugins/hooks-only' },
+					],
+					'zeta@abc': [
+						{ scope: 'user', installPath: '/plugins/zeta' },
+					],
+				},
+			}),
+		},
+		'/plugins/zeta/.claude-plugin/plugin.json': {
+			kind: 'file',
+			text: '{"name":"zeta"}',
+		},
+	};
+	engine(on, files, {
+		...SETTINGS,
+		enabledPlugins: {
+			'tools@market': true,
+			'hooks-only@market': true,
+			'zeta@abc': true,
+		},
+	});
+	const ui = await mount($);
+
+	expect(await sourceLabels(ui)).toEqual([
+		'▾ abc',
+		'▾ market',
+		'▾ Local folder',
+	]);
+	expect((await ui.find({ type: 'Text', text: '2 plugins' }))?.text).toBe(
+		'2 plugins',
+	);
+	await ui.unmount();
+});
+
+test('a marketplace label folds its plugins away and back', async ($, on) => {
+	engine(on);
+	const ui = await mount($);
+	expect(
+		await ui.find({ type: 'Button', key: 'fold:group:tools' }),
+	).toBeDefined();
+
+	await ui.press({ key: 'source:market' });
+	expect(
+		await ui.find({ type: 'Button', key: 'fold:group:tools' }),
+	).toBeUndefined();
+	expect(await sourceLabels(ui)).toEqual(['▸ market', '▾ Local folder']);
+
+	await ui.press({ key: 'source:market' });
+	expect(
+		await ui.find({ type: 'Button', key: 'fold:group:tools' }),
+	).toBeDefined();
+	await ui.unmount();
+});
+
+test('a search opens a folded marketplace that has a match', async ($, on) => {
+	engine(on);
+	const ui = await mount($);
+	await ui.press({ key: 'source:market' });
+	await ui.input({ key: 'search', text: 'plan', kind: 'change' });
+
+	expect(await sourceLabels(ui)).toEqual([]);
+	expect(await heldLabels(ui)).toEqual(['▾ market']);
+	expect(await ui.find({ type: 'Text', text: /^▾ tools/ })).toBeDefined();
+	await ui.unmount();
+});
+
+test('plugins from a single marketplace get no labels', async ($, on) => {
+	const state = engine(on);
+	state.pluginDirs = '';
+	const ui = await mount($);
+
+	expect(
+		(await ui.find({ type: 'Button', key: 'fold:group:tools' }))?.text,
+	).toMatch(/^▸ tools/);
+	expect(await sourceLabels(ui)).toEqual([]);
+	await ui.unmount();
+});
+
+test('a search keeps only the labels of groups with a match', async ($, on) => {
+	engine(on);
+	const ui = await mount($);
+	await ui.input({ key: 'search', text: 'move', kind: 'change' });
+
+	expect(await heldLabels(ui)).toEqual(['▾ Local folder']);
+	await ui.unmount();
+});
+
+test('a search finds a plugin by its author', async ($, on) => {
+	engine(on);
+	const ui = await mount($);
+	await ui.input({ key: 'search', text: 'tool maker', kind: 'change' });
+
+	expect(
+		await ui.find({ type: 'Button', key: 'row:plugin:tools:plan' }),
+	).toBeDefined();
+	expect(await ui.find({ type: 'Text', text: /^▾ mover/ })).toBeUndefined();
+	expect(await heldLabels(ui)).toEqual(['▾ market']);
+	await ui.unmount();
+});
+
+test('a search finds every plugin of a marketplace by its name', async ($, on) => {
+	engine(on);
+	const ui = await mount($);
+	await ui.input({ key: 'search', text: 'market', kind: 'change' });
+
+	expect(await ui.find({ type: 'Text', text: /^▾ tools/ })).toBeDefined();
+	expect(await ui.find({ type: 'Text', text: /hooks-only/ })).toBeDefined();
+	expect(await ui.find({ type: 'Text', text: /^▾ mover/ })).toBeUndefined();
 	await ui.unmount();
 });
 
