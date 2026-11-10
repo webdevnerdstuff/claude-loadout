@@ -3037,6 +3037,11 @@ export const register: Register = (on) => {
 		// Focus hands the pane the keyboard; without it the keys stay in the
 		// prompt and nothing in the pane answers until ctrl+x tab or a click.
 		const opened = await $.ui.open({ id: PANE, title: TITLE, focus: true });
+		// A new desktop session attaches its surface only when it first draws,
+		// so an open just before that waits and is placed once it attaches.
+		if (!opened.isPlaced && opened.reason.startsWith('no-surface')) {
+			return { text: 'Loadout opens as soon as the app is ready.' };
+		}
 		if (!opened.isPlaced) {
 			return { text: `Loadout could not be shown: ${opened.reason}` };
 		}
