@@ -91,9 +91,19 @@ export type PluginInfo = {
 	commandCount: number;
 };
 
+/** What the Plugins section says about one marketplace beside its name. */
+export type MarketplaceInfo = {
+	/** `version` or `metadata.version` from its marketplace.json, if any. */
+	version?: string;
+	/** When Claude Code last refreshed its copy, ms since the epoch. */
+	refreshedAt?: number;
+};
+
 export type SkillScan = {
 	skills: SkillEntry[];
 	plugins: PluginInfo[];
+	/** By marketplace name, from known_marketplaces.json. */
+	marketplaces: Record<string, MarketplaceInfo>;
 	commands: SkillEntry[];
 	staleOverrides: StaleOverride[];
 	/** Delete moves folders to the macOS Trash, so it is offered on a Mac only. */

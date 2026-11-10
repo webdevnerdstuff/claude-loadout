@@ -193,6 +193,8 @@ type Engine = {
 	notPlaced?: string;
 	// CLAUDE_CODE_PLUGIN_DIRS, read when the scan runs.
 	pluginDirs: string;
+	// What `git describe --tags` prints in a marketplace's clone.
+	gitTag: string;
 };
 
 // Every hook here stands for the engine beneath the plugin: the file system,
@@ -210,6 +212,7 @@ function engine(
 		writes: {},
 		opens: [],
 		pluginDirs: '/dev/mover',
+		gitTag: '',
 	};
 	on('command.register', () => ({ value: { command: 'loadout' } }));
 	on('ui.open', (_, e) => {
@@ -271,7 +274,12 @@ function engine(
 		return {
 			value: {
 				exitCode: 0,
-				stdout: e.argv[0] === 'uname' ? 'Darwin\n' : '',
+				stdout:
+					e.argv[0] === 'uname'
+						? 'Darwin\n'
+						: e.argv[0] === 'git'
+							? `${state.gitTag}\n`
+							: '',
 				stderr: '',
 				isStdoutTruncated: false,
 				isStderrTruncated: false,
@@ -1236,6 +1244,84 @@ test('a search keeps only the labels of groups with a match', async ($, on) => {
 	await ui.input({ key: 'search', text: 'move', kind: 'change' });
 
 	expect(await heldLabels(ui)).toEqual(['▾ Local folder']);
+	await ui.unmount();
+});
+
+// known_marketplaces.json with one marketplace, last refreshed two days ago,
+// cloned to /markets/market.
+const KNOWN_MARKET: Record<string, Node> = {
+	[`${HOME}/.claude/plugins/known_marketplaces.json`]: {
+		kind: 'file',
+		text: JSON.stringify({
+			market: {
+				source: { source: 'github', repo: 'owner/market' },
+				installLocation: '/markets/market',
+				lastUpdated: new Date(
+					Date.now() - 2 * 86_400_000 - 60_000,
+				).toISOString(),
+			},
+		}),
+	},
+};
+
+test('a marketplace label shows the version its marketplace.json declares', async ($, on) => {
+	engine(on, {
+		...FILES,
+		...KNOWN_MARKET,
+		'/markets/market/.claude-plugin/marketplace.json': {
+			kind: 'file',
+			text: '{"name":"market","metadata":{"version":"2.0.0"}}',
+		},
+	});
+	const ui = await mount($);
+
+	expect(
+		await ui.find({ type: 'Text', text: '2 plugins · v2.0.0' }),
+	).toBeDefined();
+	expect(await ui.find({ type: 'Text', text: '1 plugin' })).toBeDefined();
+	await ui.unmount();
+});
+
+test('a marketplace released by git tag shows that tag as its version', async ($, on) => {
+	const state = engine(on, {
+		...FILES,
+		...KNOWN_MARKET,
+		'/markets/market/.claude-plugin/marketplace.json': {
+			kind: 'file',
+			text: '{"name":"market"}',
+		},
+	});
+	state.gitTag = 'v1.0.1';
+	const ui = await mount($);
+
+	expect(
+		await ui.find({ type: 'Text', text: '2 plugins · v1.0.1' }),
+	).toBeDefined();
+	expect(state.runs).toContainEqual([
+		'git',
+		'-C',
+		'/markets/market',
+		'describe',
+		'--tags',
+		'--abbrev=0',
+	]);
+	await ui.unmount();
+});
+
+test('a marketplace with no version says when it was last refreshed', async ($, on) => {
+	engine(on, {
+		...FILES,
+		...KNOWN_MARKET,
+		'/markets/market/.claude-plugin/marketplace.json': {
+			kind: 'file',
+			text: '{"name":"market"}',
+		},
+	});
+	const ui = await mount($);
+
+	expect(
+		await ui.find({ type: 'Text', text: '2 plugins · refreshed 2d ago' }),
+	).toBeDefined();
 	await ui.unmount();
 });
 
