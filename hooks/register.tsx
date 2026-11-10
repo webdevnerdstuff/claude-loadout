@@ -7,6 +7,7 @@ import type {
 } from 'claude-code';
 
 import type {
+	MarketplaceInfo,
 	PluginInfo,
 	SkillProblem,
 	SkillEntry,
@@ -765,6 +766,72 @@ const hooksModuleOf = async (
 	}
 };
 
+// Each marketplace Claude Code knows: its version, and when its copy was
+// refreshed. The version is what its marketplace.json declares (top-level or
+// under metadata), or else the newest tag in its clone that reads as a
+// version (a repo released by tag, like v1.0.1).
+const scanMarketplaces = async (
+	$: EngineInterface,
+	home: string,
+): Promise<Record<string, MarketplaceInfo>> => {
+	const known = JSON.parse(
+		String(
+			await $.fs
+				.read(`${home}/.claude/plugins/known_marketplaces.json`)
+				.catch(() => '{}'),
+		),
+	) as Record<string, { installLocation?: unknown; lastUpdated?: unknown }>;
+	const found: Record<string, MarketplaceInfo> = {};
+	for (const [name, entry] of Object.entries(known)) {
+		const refreshedAt =
+			typeof entry.lastUpdated === 'string'
+				? Date.parse(entry.lastUpdated)
+				: NaN;
+		const manifest =
+			typeof entry.installLocation === 'string'
+				? (JSON.parse(
+						String(
+							await $.fs
+								.read(
+									`${entry.installLocation}/.claude-plugin/marketplace.json`,
+								)
+								.catch(() => '{}'),
+						),
+					) as {
+						version?: unknown;
+						metadata?: { version?: unknown };
+					})
+				: {};
+		const declared = manifest.version ?? manifest.metadata?.version;
+		const tagged =
+			typeof declared !== 'string' &&
+			typeof entry.installLocation === 'string'
+				? await $.process
+						.run([
+							'git',
+							'-C',
+							entry.installLocation,
+							'describe',
+							'--tags',
+							'--abbrev=0',
+						])
+						.then((result) =>
+							result.exitCode === 0 ? result.stdout.trim() : '',
+						)
+						.catch(() => '')
+				: '';
+		const version = typeof declared === 'string' ? declared : tagged;
+		found[name] = {
+			version: /^v?\d+(\.\d+)*$/.test(version)
+				? version.replace(/^v/, '')
+				: undefined,
+			refreshedAt: Number.isFinite(refreshedAt) ? refreshedAt : undefined,
+		};
+	}
+
+	return found;
+};
+
 const scanSkills = async ($: EngineInterface): Promise<SkillScan> => {
 	const home = (await $.env.get('HOME')) ?? '';
 	const projectDir = await $.session.root();
@@ -894,6 +961,7 @@ const scanSkills = async ($: EngineInterface): Promise<SkillScan> => {
 			).length,
 		})),
 		commands,
+		marketplaces: await scanMarketplaces($, home).catch(() => ({})),
 		syncedAt: synced.syncedAt,
 		userDir: tilde(userDir, home),
 		projectDir: tilde(projectDir, home),
@@ -906,7 +974,7 @@ const TITLE = 'Loadout';
 const USAGE_KEY = 'usage';
 
 const scan = atom({ plugin: 'loadout', key: 'scan' } as const, null, {
-	shape: 'scan-16',
+	shape: 'scan-17',
 });
 const filter = atom({ plugin: 'loadout', key: 'filter' } as const, 'local', {
 	shape: 'filter-1',
@@ -2657,6 +2725,15 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 	// start open). A search or an across-filter holds every group open.
 	const isSourceOpen = (source: string) =>
 		isPicking || !isClosed(`source:${source}`);
+	// A marketplace's version when its marketplace.json has one, or else how
+	// long since Claude Code refreshed it, so a stale copy shows.
+	const sourceNote = (source: string): string => {
+		const info = data.marketplaces?.[source];
+		if (!source || !info) return '';
+		if (info.version) return `v${info.version}`;
+
+		return info.refreshedAt ? `refreshed ${ago(info.refreshedAt)}` : '';
+	};
 	const sourceLabel = (source: string, count: number) => {
 		const name = source || 'Local folder';
 		const arrow = isSourceOpen(source) ? '▾' : '▸';
@@ -2683,7 +2760,9 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 					</Button>
 				)}
 				<Text dimColor size="caption">
-					{plural(count, 'plugin')}
+					{[plural(count, 'plugin'), sourceNote(source)]
+						.filter(Boolean)
+						.join(' · ')}
 				</Text>
 			</Box>
 		);
