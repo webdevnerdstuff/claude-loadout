@@ -1572,7 +1572,7 @@ test('/loadout opens the pane with the keyboard, so it can be used at once', asy
 
 test('/loadout says why when the pane could not be placed', async ($, on) => {
 	const state = engine(on);
-	state.notPlaced = 'no-surface';
+	state.notPlaced = 'narrow: 110 columns needed, 80 now';
 	await $.session.start({
 		cwd: '/project',
 		surface: 'terminal',
@@ -1580,7 +1580,25 @@ test('/loadout says why when the pane could not be placed', async ($, on) => {
 	});
 	const { text } = await $.command.run({ command: 'loadout' });
 
-	expect(text).toMatch(/no-surface/);
+	expect(text).toBe(
+		'Loadout could not be shown: narrow: 110 columns needed, 80 now',
+	);
+});
+
+test('/loadout before the app attaches says the pane is on its way, not that it failed', async ($, on) => {
+	const state = engine(on);
+	state.notPlaced = 'no-surface: no surface is attached';
+	await $.session.start({
+		cwd: '/project',
+		surface: 'desktop',
+		isInteractive: true,
+	});
+	const { text } = await $.command.run({ command: 'loadout' });
+
+	expect(state.opens).toEqual([
+		expect.objectContaining({ id: 'loadout', focus: true }),
+	]);
+	expect(text).toBe('Loadout opens as soon as the app is ready.');
 });
 
 test('the focused pane starts its ring on the search box, so typing searches at once', async ($, on) => {
