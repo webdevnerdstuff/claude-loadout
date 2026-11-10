@@ -2589,14 +2589,24 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 		(value === 'issues' || value === 'off') && counts[value] === 0;
 	const chosen: SkillFilter = isEmptyChip(picked) ? 'local' : picked;
 	// The search matches a skill or command by its name, its description or
-	// the plugin it comes from, ignoring case.
+	// the plugin it comes from, and a plugin's by that plugin's author and
+	// marketplace too, ignoring case.
 	const needle = searched.trim().toLowerCase();
 	const isSearching = needle !== '';
+	const mentions = (texts: Array<string | undefined>): boolean =>
+		texts.some((text) => text?.toLowerCase().includes(needle));
+	const pluginWords = (plugin?: PluginInfo): Array<string | undefined> =>
+		plugin ? [plugin.name, plugin.author, plugin.marketplace] : [];
 	const matches = (one: SkillEntry): boolean =>
 		!isSearching ||
-		[one.name, one.description, one.group].some((text) =>
-			text.toLowerCase().includes(needle),
-		);
+		mentions([
+			one.name,
+			one.description,
+			one.group,
+			...(one.source === 'plugin'
+				? pluginWords(data.plugins.find((p) => p.name === one.group))
+				: []),
+		]);
 	const keeps = (skill: SkillEntry): boolean => {
 		if (!matches(skill)) return false;
 		if (chosen === 'local') return true;
@@ -2623,13 +2633,91 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 						plugins.some((skill) => skill.group === plugin.name) ||
 						(isSearching &&
 							!isAcross &&
-							(plugin.name.toLowerCase().includes(needle) ||
+							(mentions(pluginWords(plugin)) ||
 								data.commands.some(
 									(command) =>
 										command.group === plugin.name &&
 										matches(command),
 								))),
 				);
+	// Plugins sit under the marketplace they came from, A to Z, with plugins
+	// loaded from a folder ('') last. With one source among all the plugins,
+	// a label would say nothing, so none is drawn.
+	const sourceOf = (plugin: PluginInfo): string => plugin.marketplace ?? '';
+	const bySource = (a: string, b: string): number => {
+		if (a === b) return 0;
+		if (a === '') return 1;
+		if (b === '') return -1;
+
+		return a.localeCompare(b);
+	};
+	const sources = [...new Set(listedPlugins.map(sourceOf))].sort(bySource);
+	const isLabelled = new Set(data.plugins.map(sourceOf)).size > 1;
+	// Each label folds its group away (`closed:source:<marketplace>`; groups
+	// start open). A search or an across-filter holds every group open.
+	const isSourceOpen = (source: string) =>
+		isPicking || !isClosed(`source:${source}`);
+	const sourceLabel = (source: string, count: number) => {
+		const name = source || 'Local folder';
+		const arrow = isSourceOpen(source) ? '▾' : '▸';
+
+		return (
+			<Box
+				flexDirection="row"
+				gap={1}
+				alignItems="center"
+				paddingLeft={1}
+				marginTop="sm"
+			>
+				{isPicking ? (
+					<Text>{`${arrow} ${name}`}</Text>
+				) : (
+					<Button
+						key={`source:${source}`}
+						plain
+						onPress={() =>
+							void toggle($, `closed:source:${source}`)
+						}
+					>
+						{`${arrow} ${name}`}
+					</Button>
+				)}
+				<Text dimColor size="caption">
+					{plural(count, 'plugin')}
+				</Text>
+			</Box>
+		);
+	};
+	const pluginEntry = (plugin: PluginInfo) => {
+		const own = plugins.filter((skill) => skill.group === plugin.name);
+		const commands = isAcross
+			? []
+			: data.commands.filter(
+					(command) =>
+						command.group === plugin.name && matches(command),
+				);
+		if (own.length + commands.length === 0) return bare(plugin);
+		const tally = [
+			own.length ? plural(own.length, 'skill') : '',
+			commands.length ? plural(commands.length, 'command') : '',
+		]
+			.filter(Boolean)
+			.join(' · ');
+
+		const newer = plugin.marketplace
+			? available[`${plugin.name}@${plugin.marketplace}`]
+			: undefined;
+
+		return fold(
+			`group:${plugin.name}`,
+			plugin.name,
+			[...own, ...commands],
+			isPicking,
+			pluginTags(plugin),
+			tally,
+			newer ? `⬆ ${newer.latest} available` : undefined,
+		);
+	};
 	const time = new Date(data.scannedAt).toLocaleTimeString([], {
 		hour: 'numeric',
 		minute: '2-digit',
@@ -2819,39 +2907,22 @@ async function drawPane($: EngineInterface, e: RenderInput<'Pane'>) {
 				listedPlugins.length === 0 &&
 				note('No enabled plugins.')}
 			{openPlugins &&
-				listedPlugins.map((plugin) => {
-					const own = plugins.filter(
-						(skill) => skill.group === plugin.name,
+				sources.map((source) => {
+					const group = listedPlugins.filter(
+						(plugin) => sourceOf(plugin) === source,
 					);
-					const commands = isAcross
-						? []
-						: data.commands.filter(
-								(command) =>
-									command.group === plugin.name &&
-									matches(command),
-							);
-					if (own.length + commands.length === 0) return bare(plugin);
-					const tally = [
-						own.length ? plural(own.length, 'skill') : '',
-						commands.length
-							? plural(commands.length, 'command')
-							: '',
-					]
-						.filter(Boolean)
-						.join(' · ');
 
-					const newer = plugin.marketplace
-						? available[`${plugin.name}@${plugin.marketplace}`]
-						: undefined;
+					if (!isLabelled) return group.map(pluginEntry);
 
-					return fold(
-						`group:${plugin.name}`,
-						plugin.name,
-						[...own, ...commands],
-						isPicking,
-						pluginTags(plugin),
-						tally,
-						newer ? `⬆ ${newer.latest} available` : undefined,
+					return (
+						<Box key={`market:${source}`} flexDirection="column">
+							{sourceLabel(source, group.length)}
+							{isSourceOpen(source) && (
+								<Box paddingLeft={1} flexDirection="column">
+									{group.map(pluginEntry)}
+								</Box>
+							)}
+						</Box>
 					);
 				})}
 

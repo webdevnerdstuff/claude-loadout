@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 chrome="${CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 page="file://$PWD/docs/demo/pane.html"
-size="${SIZE:-800,1226}"
+size="${SIZE:-800,1298}"
 
 "$chrome" --headless --disable-gpu --hide-scrollbars --force-device-scale-factor=2 \
 	--default-background-color=00000000 \
